@@ -28,3 +28,8 @@ Thumbs.db
 
 # Local-only engineering audit reports
 .local-audits/
+
+# Local MySQL runtime database storage (never commit binary tablespaces)
+/database/mysql-data/
+/database/mysql-data-corrupt/
+/storage/mysql_data/
