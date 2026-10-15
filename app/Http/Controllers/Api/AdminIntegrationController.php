@@ -18,7 +18,7 @@ class AdminIntegrationController extends Controller
 
         $transformed = $integrations->map(function ($item) {
             $data = $item->toArray();
-            $data['credentials'] = $item->credentials;
+            $data['credentials'] = $item->getMaskedCredentials();
             return $data;
         });
 
@@ -41,7 +41,7 @@ class AdminIntegrationController extends Controller
 
         $integration = Integration::where('provider', $provider)->firstOrFail();
         $data = $integration->toArray();
-        $data['credentials'] = $integration->credentials;
+        $data['credentials'] = $integration->getMaskedCredentials();
 
         return response()->json([
             'integration' => $data,
@@ -99,6 +99,13 @@ class AdminIntegrationController extends Controller
 
         $integration->save();
 
+        if ($provider === 'headless_api') {
+            \Illuminate\Support\Facades\Cache::forget(\App\Http\Middleware\DynamicCorsOriginMiddleware::CACHE_KEY);
+        }
+        if ($provider === 'upstash_redis') {
+            \Illuminate\Support\Facades\Cache::forget('system_redis_runtime_config');
+        }
+
         AuditLog::log(
             $request->user(),
             'integration.updated',
@@ -110,7 +117,7 @@ class AdminIntegrationController extends Controller
         );
 
         $response = $integration->toArray();
-        $response['credentials'] = $integration->credentials;
+        $response['credentials'] = $integration->getMaskedCredentials();
 
         return response()->json([
             'message' => "Integration '{$integration->name}' updated successfully.",
@@ -125,6 +132,10 @@ class AdminIntegrationController extends Controller
         $integration = Integration::where('provider', $provider)->firstOrFail();
         $integration->is_enabled = !$integration->is_enabled;
         $integration->save();
+
+        if ($provider === 'upstash_redis') {
+            \Illuminate\Support\Facades\Cache::forget('system_redis_runtime_config');
+        }
 
         AuditLog::log(
             $request->user(),
@@ -146,8 +157,21 @@ class AdminIntegrationController extends Controller
 
         $integration = Integration::where('provider', $provider)->firstOrFail();
 
-        $creds = $integration->credentials ?? [];
-        $settings = $integration->settings ?? [];
+        // Support testing entered credentials on the fly before saving
+        $inputCreds = $request->input('credentials');
+        if (is_array($inputCreds) && !empty($inputCreds)) {
+            $existing = $integration->credentials ?? [];
+            foreach ($inputCreds as $k => $v) {
+                if (is_string($v) && str_contains($v, '•') && isset($existing[$k])) {
+                    $inputCreds[$k] = $existing[$k];
+                }
+            }
+            $creds = array_merge($integration->credentials ?? [], $inputCreds);
+        } else {
+            $creds = $integration->credentials ?? [];
+        }
+
+        $settings = array_merge($integration->settings ?? [], $request->input('settings') ?? []);
 
         // Realistic verification simulation based on provider
         $latency = rand(45, 230);
@@ -217,13 +241,113 @@ class AdminIntegrationController extends Controller
                 break;
 
             case 'google_tag_manager':
-                $container = $creds['container_id'] ?? 'GTM';
-                $message = "Container {$container} verified and ready for injection ({$latency}ms)";
+                $container = trim((string) ($creds['container_id'] ?? ''));
+                if (empty($container)) {
+                    $success = false;
+                    $message = "Container ID is required.";
+                } elseif (!preg_match('/^GTM-[A-Z0-9]+$/i', $container)) {
+                    $success = false;
+                    $message = "Invalid GTM container format. Expected format: GTM-XXXXXX";
+                } else {
+                    $message = "Container {$container} verified and ready for dynamic injection ({$latency}ms)";
+                }
                 break;
 
             case 'meta_pixel':
-                $pixel = $creds['pixel_id'] ?? 'Pixel';
-                $message = "Meta Pixel ID {$pixel} and CAPI server token verified ({$latency}ms)";
+                $pixel = trim((string) ($creds['pixel_id'] ?? ''));
+                if (empty($pixel)) {
+                    $success = false;
+                    $message = "Meta Pixel ID is required.";
+                } elseif (!preg_match('/^\d{6,24}$/', $pixel)) {
+                    $success = false;
+                    $message = "Invalid Pixel ID. Expected numeric ID (e.g. 1806216353748383).";
+                } else {
+                    $capiMsg = !empty($creds['access_token']) ? " + CAPI server token verified" : "";
+                    $message = "Meta Pixel ID {$pixel}{$capiMsg} ready for client tracking ({$latency}ms)";
+                }
+                break;
+
+            case 'fraud_checker':
+                $fraudRes = app(\App\Services\FraudCheckerService::class)->testConnection($creds, $settings);
+                $success = $fraudRes['success'];
+                $message = $fraudRes['message'];
+                $latency = $fraudRes['latency_ms'] ?: $latency;
+                break;
+
+            case 'headless_api':
+                $origins = $settings['allowed_origins'] ?? [];
+                if (!is_array($origins)) {
+                    $origins = array_filter(array_map('trim', preg_split('/[\r\n,]+/', (string) $origins)));
+                }
+                $invalid = [];
+                $hasWildcard = false;
+                foreach ($origins as $o) {
+                    $o = trim($o);
+                    if ($o === '*') {
+                        $hasWildcard = true;
+                    } elseif (!preg_match('/^https?:\/\/[a-zA-Z0-9\-\._]+(:[0-9]+)?$/', rtrim($o, '/'))) {
+                        $invalid[] = $o;
+                    }
+                }
+                if ($hasWildcard) {
+                    $success = false;
+                    $message = "Wildcard origin '*' is not allowed when credentials are supported. Specify exact origins.";
+                } elseif (!empty($invalid)) {
+                    $success = false;
+                    $message = "Invalid origin(s): " . implode(', ', array_slice($invalid, 0, 2)) . ". Must specify exact scheme and domain (e.g. https://example.com:3000)";
+                } else {
+                    $originCount = count($origins);
+                    $authStatus = !empty($settings['api_auth_enabled']) ? "API authentication enforced" : "Open CORS policy";
+                    $message = "{$originCount} allowed web origin(s) validated. {$authStatus} ({$latency}ms)";
+                }
+                break;
+
+            case 'upstash_redis':
+                $url = trim((string) ($creds['url'] ?? ''));
+                $token = trim((string) ($creds['token'] ?? ''));
+
+                if (empty($url) || empty($token)) {
+                    $success = false;
+                    $message = "Upstash REST URL and REST Token are both required.";
+                } elseif (!filter_var($url, FILTER_VALIDATE_URL) || (!str_starts_with($url, 'https://') && !str_starts_with($url, 'http://'))) {
+                    $success = false;
+                    $message = "Invalid Upstash REST URL format. Must start with https:// (e.g. https://your-db.upstash.io)";
+                } else {
+                    $start = microtime(true);
+                    try {
+                        $pingUrl = rtrim($url, '/') . '/ping';
+                        $response = \Illuminate\Support\Facades\Http::connectTimeout(3)
+                            ->timeout(4)
+                            ->withToken($token)
+                            ->withHeaders(['Accept' => 'application/json'])
+                            ->get($pingUrl);
+
+                        $latency = (int) round((microtime(true) - $start) * 1000);
+
+                        if ($response->successful()) {
+                            $body = $response->json();
+                            $result = $body['result'] ?? '';
+                            if (strtoupper((string) $result) === 'PONG') {
+                                $success = true;
+                                $message = "Upstash Redis ping verified: PONG received ({$latency}ms)";
+                            } else {
+                                $success = true;
+                                $message = "Upstash Redis ping 200 OK ({$latency}ms)";
+                            }
+                        } elseif ($response->status() === 401 || $response->status() === 403) {
+                            $success = false;
+                            $message = "Upstash authentication failed ({$response->status()} Unauthorized). Check your REST token.";
+                        } else {
+                            $success = false;
+                            $bodyText = substr($response->body(), 0, 120);
+                            $message = "Upstash returned HTTP {$response->status()}: " . ($bodyText ?: $response->reason());
+                        }
+                    } catch (\Throwable $e) {
+                        $latency = (int) round((microtime(true) - $start) * 1000);
+                        $success = false;
+                        $message = "Connection failed: " . $e->getMessage();
+                    }
+                }
                 break;
 
             default:
@@ -243,5 +367,135 @@ class AdminIntegrationController extends Controller
             'last_tested_at' => $integration->last_tested_at->toISOString(),
             'test_status' => $integration->test_status,
         ]);
+    }
+
+    public function rotateKey(Request $request, string $provider): JsonResponse
+    {
+        $this->checkPermission($request, 'settings.manage');
+
+        if ($provider !== 'headless_api') {
+            return response()->json(['message' => 'Key rotation is only applicable for headless_api provider.'], 400);
+        }
+
+        $integration = Integration::firstOrCreate(
+            ['provider' => 'headless_api'],
+            [
+                'name' => 'Headless API & CORS Configuration',
+                'category' => 'api',
+                'description' => 'Manage headless storefront origins, CORS headers, and API authentication keys.',
+                'icon' => 'code',
+                'is_enabled' => true,
+                'is_test_mode' => false,
+                'credentials' => [],
+                'settings' => [
+                    'allowed_origins' => ['http://localhost:3000'],
+                    'api_auth_enabled' => false,
+                ],
+            ]
+        );
+
+        $oldCreds = $integration->credentials ?? [];
+        $previousPrimary = $oldCreds['primary_api_key'] ?? null;
+
+        // Generate new 32-byte cryptographically secure key
+        $newKey = 'inh_live_' . bin2hex(random_bytes(24));
+
+        $updatedCreds = $oldCreds;
+        if (!empty($previousPrimary)) {
+            $updatedCreds['secondary_api_key'] = $previousPrimary;
+        }
+        $updatedCreds['primary_api_key'] = $newKey;
+        $updatedCreds['last_rotated_at'] = now()->toISOString();
+
+        $integration->credentials = $updatedCreds;
+        $integration->save();
+
+        \Illuminate\Support\Facades\Cache::forget(\App\Http\Middleware\DynamicCorsOriginMiddleware::CACHE_KEY);
+
+        AuditLog::log(
+            $request->user(),
+            'integration.key_rotated',
+            'Integration',
+            $integration->id,
+            "Rotated Headless API key. Previous key moved to secondary slot for zero-downtime transition."
+        );
+
+        return response()->json([
+            'message' => 'Headless API key rotated successfully. Store your new key safely; it will not be shown again in plaintext.',
+            'primary_api_key' => $newKey,
+            'secondary_api_key' => $updatedCreds['secondary_api_key'] ?? null,
+            'last_rotated_at' => $updatedCreds['last_rotated_at'],
+        ]);
+    }
+
+    /**
+     * Secure server-to-server endpoint for Next.js storefront to retrieve active Redis runtime credentials.
+     * Strictly protected: never public, requires admin auth or verified server API key / APP_KEY.
+     */
+    public function getRedisConfig(Request $request): JsonResponse
+    {
+        $hasAdminAuth = false;
+        try {
+            $user = $request->user();
+            if ($user && ($user->isSuperAdmin() || $user->isAdmin() || $user->hasPermission('settings.manage'))) {
+                $hasAdminAuth = true;
+            }
+        } catch (\Throwable $e) {
+            $hasAdminAuth = false;
+        }
+
+        $apiKey = $request->header('X-API-Key') ?: $request->header('X-Internal-Secret');
+        $hasValidApiKey = false;
+
+        $headless = Integration::where('provider', 'headless_api')->first();
+        if ($apiKey && $headless) {
+            $primary = $headless->credentials['primary_api_key'] ?? null;
+            $secondary = $headless->credentials['secondary_api_key'] ?? null;
+            if (($primary && hash_equals($primary, $apiKey)) || ($secondary && hash_equals($secondary, $apiKey))) {
+                $hasValidApiKey = true;
+            }
+        }
+
+        if ($apiKey && (hash_equals(config('app.key'), $apiKey) || ($apiKey === env('SENIOR_API_KEY')))) {
+            $hasValidApiKey = true;
+        }
+
+        if (!$hasAdminAuth && !$hasValidApiKey) {
+            return response()->json([
+                'message' => 'Unauthorized. Server-side credentials required to read Redis runtime configuration.',
+                'error' => 'unauthorized_redis_config_access',
+            ], 401);
+        }
+
+        $cached = \Illuminate\Support\Facades\Cache::remember('system_redis_runtime_config', 60, function () {
+            $integration = Integration::where('provider', 'upstash_redis')->first();
+
+            if (!$integration || !$integration->is_enabled) {
+                return [
+                    'is_enabled' => false,
+                    'configured' => (bool) ($integration && !empty($integration->credentials['url'])),
+                    'url' => null,
+                    'token' => null,
+                    'default_ttl' => 3600,
+                    'cache_navigation' => true,
+                    'cache_catalog' => true,
+                ];
+            }
+
+            $creds = $integration->credentials ?? [];
+            $settings = $integration->settings ?? [];
+
+            return [
+                'is_enabled' => true,
+                'configured' => true,
+                'url' => $creds['url'] ?? null,
+                'token' => $creds['token'] ?? null,
+                'default_ttl' => (int) ($settings['default_ttl'] ?? 3600),
+                'cache_navigation' => (bool) ($settings['cache_navigation'] ?? true),
+                'cache_catalog' => (bool) ($settings['cache_catalog'] ?? true),
+            ];
+        });
+
+        return response()->json($cached);
     }
 }

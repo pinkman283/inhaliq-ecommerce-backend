@@ -391,14 +391,25 @@ class AdminSettingsController extends Controller
         $gtm = Integration::where('provider', 'google_tag_manager')->where('is_enabled', true)->first();
         $meta = Integration::where('provider', 'meta_pixel')->where('is_enabled', true)->first();
 
+        $metaSettings = $meta?->settings ?? [];
+
         return response()->json([
             'gtm' => [
-                'enabled' => (bool) $gtm,
-                'container_id' => $gtm->credentials['container_id'] ?? null,
+                'enabled' => (bool) ($gtm && !empty($gtm->credentials['container_id'])),
+                'container_id' => $gtm?->credentials['container_id'] ?? null,
+                'data_layer_name' => $gtm?->settings['data_layer_name'] ?? 'dataLayer',
             ],
             'meta_pixel' => [
-                'enabled' => (bool) $meta,
-                'pixel_id' => $meta->credentials['pixel_id'] ?? null,
+                'enabled' => (bool) ($meta && !empty($meta->credentials['pixel_id'])),
+                'pixel_id' => $meta?->credentials['pixel_id'] ?? null,
+                'settings' => [
+                    'auto_pageview' => (bool) ($metaSettings['auto_pageview'] ?? true),
+                    'track_view_content' => (bool) ($metaSettings['track_view_content'] ?? true),
+                    'track_search' => (bool) ($metaSettings['track_search'] ?? true),
+                    'track_add_to_cart' => (bool) ($metaSettings['track_add_to_cart'] ?? true),
+                    'track_initiate_checkout' => (bool) ($metaSettings['track_initiate_checkout'] ?? true),
+                    'track_purchase' => (bool) ($metaSettings['track_purchase'] ?? true),
+                ],
             ],
         ]);
     }

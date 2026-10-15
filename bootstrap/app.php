@@ -20,11 +20,13 @@ return Application::configure(basePath: dirname(__DIR__))
             $middleware->trustProxies(at: array_map('trim', explode(',', $trusted)));
         }
 
+        $middleware->prepend(\App\Http\Middleware\DynamicCorsOriginMiddleware::class);
         $middleware->append(\App\Http\Middleware\SecurityHeaders::class);
 
         $middleware->alias([
             'admin' => EnsureAdmin::class,
             'super_admin' => EnsureSuperAdmin::class,
+            'headless.api' => \App\Http\Middleware\EnsureHeadlessApiKey::class,
             'abilities' => \Laravel\Sanctum\Http\Middleware\CheckAbilities::class,
             'ability' => \Laravel\Sanctum\Http\Middleware\CheckForAnyAbility::class,
             'sliding-throttle' => \App\Http\Middleware\SlidingWindowThrottle::class,

@@ -138,6 +138,7 @@ Route::post('/leads/capture', [LeadCaptureController::class, 'capture'])->middle
 Route::get('/theme-settings', [ThemeController::class, 'publicSettings']);
 Route::get('/sitemap.xml', [AdminSettingsController::class, 'sitemapXml']);
 Route::get('/integrations/tracking', [AdminSettingsController::class, 'publicTrackingScripts']);
+Route::get('/system/redis-config', [AdminIntegrationController::class, 'getRedisConfig']);
 Route::post('/products/{productId}/reviews', [ReviewController::class, 'store'])->middleware('sliding-throttle:customer-reviews');
 
 // Dynamic Storefront Header Navigation
@@ -559,6 +560,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
         Route::put('/{provider}', [AdminIntegrationController::class, 'update']);
         Route::post('/{provider}/toggle', [AdminIntegrationController::class, 'toggle']);
         Route::post('/{provider}/test', [AdminIntegrationController::class, 'test']);
+        Route::post('/{provider}/rotate-key', [AdminIntegrationController::class, 'rotateKey']);
     });
 
     // 14 Specialized Business Intelligence Reports

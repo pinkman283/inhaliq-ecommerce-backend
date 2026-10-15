@@ -340,6 +340,56 @@ class Phase3IntegrationsAndSettingsSeeder extends Seeder
                 'test_status' => 'connected',
                 'test_message' => 'Fraud API connected. 0.05s average lookup',
             ],
+
+            // Headless API & CORS
+            [
+                'provider' => 'headless_api',
+                'name' => 'Headless API & CORS Configuration',
+                'category' => 'api',
+                'description' => 'Manage headless storefront web origins, CORS headers, rate limiting, and API authentication keys.',
+                'icon' => 'code',
+                'is_enabled' => true,
+                'is_test_mode' => false,
+                'credentials' => [
+                    'primary_api_key' => 'inh_live_7a8f9c2d1e4b6093f8e12a4b8c9d0e1f3a5b7c9e',
+                    'secondary_api_key' => null,
+                ],
+                'settings' => [
+                    'allowed_origins' => [
+                        'http://localhost:3000',
+                        'http://127.0.0.1:3000',
+                        'https://aether-ecommerce-frontend.vercel.app',
+                    ],
+                    'api_auth_enabled' => false,
+                    'rate_limit_per_minute' => 60,
+                ],
+                'last_tested_at' => now(),
+                'test_status' => 'connected',
+                'test_message' => '3 allowed web origins validated. Dynamic CORS active.',
+            ],
+
+            // System & Edge Cache
+            [
+                'provider' => 'upstash_redis',
+                'name' => 'Upstash Redis Cache',
+                'category' => 'system',
+                'description' => 'Serverless Redis integration for sub-millisecond edge caching, storefront navigation caching, and stampede protection.',
+                'icon' => 'database',
+                'is_enabled' => false,
+                'is_test_mode' => false,
+                'credentials' => [
+                    'url' => '',
+                    'token' => '',
+                ],
+                'settings' => [
+                    'default_ttl' => 3600,
+                    'cache_navigation' => true,
+                    'cache_catalog' => true,
+                ],
+                'last_tested_at' => null,
+                'test_status' => 'untested',
+                'test_message' => 'Not configured yet',
+            ],
         ];
 
         foreach ($integrations as $item) {
