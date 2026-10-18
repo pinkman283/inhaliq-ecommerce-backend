@@ -37,6 +37,7 @@ class Product extends Model
         'review_count',
         'tags',
         'specifications',
+        'options',
     ];
 
     protected function casts(): array
@@ -56,6 +57,7 @@ class Product extends Model
             'review_count' => 'integer',
             'tags' => 'array',
             'specifications' => 'array',
+            'options' => 'array',
         ];
     }
 
@@ -187,9 +189,25 @@ class Product extends Model
 
     public function syncStockFromVariants(): void
     {
-        if ($this->variants()->exists()) {
-            $totalStock = (int) $this->variants()->sum('stock_quantity');
+        if ($this->variants()->where('is_active', true)->exists()) {
+            $totalStock = (int) $this->variants()->where('is_active', true)->sum('stock_quantity');
             $this->updateQuietly(['stock_quantity' => $totalStock]);
         }
+    }
+
+    /**
+     * Determine whether the product has configured dynamic options.
+     */
+    public function hasOptions(): bool
+    {
+        return !empty($this->options) && is_array($this->options) && count($this->options) > 0;
+    }
+
+    /**
+     * Accessor for $product->has_options
+     */
+    public function getHasOptionsAttribute(): bool
+    {
+        return $this->hasOptions();
     }
 }

@@ -177,9 +177,34 @@ class CartValidationController extends Controller
                     continue;
                 }
 
+                // CASE D2: Variant is inactive
+                if (!$variant->is_active) {
+                    $isValidCart = false;
+                    $hasChanges = true;
+                    $hasInactiveItems = true;
+                    $notices[] = "Selected option for '{$product->name}' is currently unavailable.";
+                    $evaluatedItems[] = [
+                        'product_id' => $productId,
+                        'variant_id' => $variantId,
+                        'status' => 'inactive_variant',
+                        'is_valid' => false,
+                        'requested_quantity' => $requestedQty,
+                        'available_stock' => 0,
+                        'normalized_quantity' => 0,
+                        'unit_price' => $variant->effective_price,
+                        'total_price' => 0.00,
+                        'message' => "Selected option for '{$product->name}' is currently unavailable.",
+                        'product' => (new ProductResource($product))->resolve(),
+                        'variant' => (new ProductVariantResource($variant))->resolve(),
+                    ];
+                    continue;
+                }
+
                 $availableStock = (int) $variant->stock_quantity;
-                $priceModifier = (float) ($variant->price_modifier ?? 0);
-                $unitPrice += $priceModifier;
+                $unitPrice = $variant->effective_price;
+                $priceModifier = $variant->price !== null
+                    ? round($unitPrice - (float) $product->price, 2)
+                    : (float) ($variant->price_modifier ?? 0);
             }
 
             // Price change detection

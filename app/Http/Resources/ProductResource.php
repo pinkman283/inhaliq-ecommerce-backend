@@ -49,6 +49,8 @@ class ProductResource extends JsonResource
             'review_count' => (int) ($this->review_count ?? 0),
             'tags' => is_array($this->tags) ? $this->tags : [],
             'specifications' => is_array($this->specifications) ? $this->specifications : null,
+            'options' => is_array($this->options) ? $this->options : ($this->options ? json_decode((string) $this->options, true) : null),
+            'has_options' => (bool) $this->hasOptions(),
             'created_at' => $this->created_at ? $this->created_at->toISOString() : null,
             'updated_at' => $this->updated_at ? $this->updated_at->toISOString() : null,
 
@@ -64,7 +66,15 @@ class ProductResource extends JsonResource
             'subcategory' => $this->whenLoaded('subcategory', fn() => $this->subcategory ? new ProductCategoryResource($this->subcategory) : null),
             'brandRelation' => $this->whenLoaded('brandRelation', fn() => $this->brandRelation ? new ProductBrandResource($this->brandRelation) : null),
             'brand_relation' => $this->whenLoaded('brandRelation', fn() => $this->brandRelation ? new ProductBrandResource($this->brandRelation) : null),
-            'variants' => $this->whenLoaded('variants', fn() => ProductVariantResource::collection($this->variants)),
+            'variants' => $this->whenLoaded('variants', function () {
+                $activeVariants = $this->variants->filter(fn($v) => (bool) ($v->is_active ?? true))->values();
+                foreach ($activeVariants as $variant) {
+                    if (!$variant->relationLoaded('product')) {
+                        $variant->setRelation('product', $this->resource);
+                    }
+                }
+                return ProductVariantResource::collection($activeVariants);
+            }),
             'reviews' => $this->whenLoaded('reviews', fn() => ProductReviewResource::collection($this->reviews)),
         ];
     }

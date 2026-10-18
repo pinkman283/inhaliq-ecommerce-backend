@@ -120,6 +120,13 @@ class AdminPurchaseOrderController extends Controller
             foreach ($validated['items'] as $itemInput) {
                 $product = Product::findOrFail($itemInput['product_id']);
                 $variant = !empty($itemInput['variant_id']) ? ProductVariant::find($itemInput['variant_id']) : null;
+
+                if ($variant && (int) $variant->product_id !== (int) $product->id) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'items' => ["Selected variant does not belong to product '{$product->name}'."],
+                    ]);
+                }
+
                 $unitCost = (float) $itemInput['unit_cost'];
                 $qty = (int) $itemInput['quantity_ordered'];
                 $itemSubtotal = $unitCost * $qty;

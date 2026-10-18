@@ -70,7 +70,13 @@ class AdminInventoryValuationController extends Controller
                 $totalValuation = 0.00;
             }
 
-            $potentialRetailValue = $product->stock_quantity * (float) $product->price;
+            if ($product->variants && $product->variants->isNotEmpty()) {
+                $potentialRetailValue = (float) $product->variants->sum(function ($v) {
+                    return (int) $v->stock_quantity * (float) $v->effective_price;
+                });
+            } else {
+                $potentialRetailValue = (int) $product->stock_quantity * (float) $product->price;
+            }
             $potentialGrossMargin = $potentialRetailValue - $totalValuation;
 
             return [

@@ -98,6 +98,35 @@ class SecurityHardeningTest extends TestCase
             ]);
     }
 
+    public function test_unauthenticated_guest_cannot_access_customer_order_by_order_number(): void
+    {
+        $alicesOrder = $this->createOrderFor($this->customerAlice);
+
+        // Guest without token tries to view Alice's order
+        $response = $this->getJson("/api/orders/{$alicesOrder->order_number}");
+
+        $response->assertStatus(403)
+            ->assertJson([
+                'message' => 'Access Denied: You do not have authorization to view this customer order.',
+            ]);
+    }
+
+    public function test_authenticated_customer_can_access_their_own_order_confirmation(): void
+    {
+        $alicesOrder = $this->createOrderFor($this->customerAlice);
+
+        // Alice views her own order
+        Sanctum::actingAs($this->customerAlice, ['customer:access']);
+
+        $response = $this->getJson("/api/orders/{$alicesOrder->order_number}");
+
+        $response->assertStatus(200)
+            ->assertJson([
+                'order_number' => $alicesOrder->order_number,
+                'customer_email' => $this->customerAlice->email,
+            ]);
+    }
+
     public function test_order_cannot_be_accessed_by_sequential_integer_id(): void
     {
         $order = $this->createOrderFor($this->customerAlice);

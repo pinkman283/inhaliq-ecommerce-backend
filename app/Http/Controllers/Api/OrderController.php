@@ -220,13 +220,6 @@ class OrderController extends Controller
                         ]);
                     }
 
-                    // Enforce stock availability
-                    if ($product->stock_quantity < $itemData['quantity']) {
-                        throw \Illuminate\Validation\ValidationException::withMessages([
-                            'items' => ["Insufficient inventory for product '{$product->name}'. Only {$product->stock_quantity} unit(s) available."],
-                        ]);
-                    }
-
                     $variant = null;
                     $unitPrice = (float) $product->price;
                     $variantName = null;
@@ -241,14 +234,28 @@ class OrderController extends Controller
                             ]);
                         }
 
+                        // Catalog Integrity: Active Variant check
+                        if (!$variant->is_active) {
+                            throw \Illuminate\Validation\ValidationException::withMessages([
+                                'items' => ["Selected variant for product '{$product->name}' is currently inactive and cannot be ordered."],
+                            ]);
+                        }
+
                         if ($variant->stock_quantity < $itemData['quantity']) {
                             throw \Illuminate\Validation\ValidationException::withMessages([
                                 'items' => ["Insufficient inventory for variant '{$variant->name}'. Only {$variant->stock_quantity} unit(s) available."],
                             ]);
                         }
 
-                        $unitPrice += (float) $variant->price_modifier;
+                        $unitPrice = $variant->effective_price;
                         $variantName = $variant->name;
+                    }
+
+                    // Enforce stock availability on parent product
+                    if ($product->stock_quantity < $itemData['quantity']) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'items' => ["Insufficient inventory for product '{$product->name}'. Only {$product->stock_quantity} unit(s) available."],
+                        ]);
                     }
 
                     $totalItemPrice = round($unitPrice * $itemData['quantity'], 2);
@@ -263,6 +270,7 @@ class OrderController extends Controller
                         'product_sku' => $variant ? $variant->sku : $product->sku,
                         'product_image' => $productImage,
                         'variant_name' => $variantName,
+                        'variant_attributes' => ($variant && !empty($variant->attributes)) ? $variant->attributes : null,
                         'unit_price' => $unitPrice,
                         'quantity' => $itemData['quantity'],
                         'total_price' => $totalItemPrice,

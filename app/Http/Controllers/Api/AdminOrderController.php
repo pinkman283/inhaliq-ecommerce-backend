@@ -197,7 +197,12 @@ class AdminOrderController extends Controller
             $variant = null;
             if (!empty($item['variant_id'])) {
                 $variant = ProductVariant::where('id', $item['variant_id'])->where('product_id', $product->id)->firstOrFail();
-                $cataloguePrice += (float) $variant->price_modifier;
+                if (!$variant->is_active) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'items' => ["The selected variant '{$variant->name}' is inactive and cannot be ordered."],
+                    ]);
+                }
+                $cataloguePrice = (float) $variant->effective_price;
             }
 
             $submittedPrice = isset($item['unit_price']) ? round((float) $item['unit_price'], 2) : null;
@@ -254,6 +259,8 @@ class AdminOrderController extends Controller
                 'product_name' => $product->name,
                 'product_sku' => $variant ? $variant->sku : $product->sku,
                 'product_image' => $product->primaryImage?->image_url ?? $product->images?->first()?->image_url,
+                'variant_name' => $variant?->name,
+                'variant_attributes' => $variant?->variant_attributes,
                 'unit_price' => $unitPrice,
                 'original_unit_price' => $cataloguePrice,
                 'is_price_overridden' => $isOverridden,

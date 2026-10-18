@@ -23,7 +23,9 @@ class AdminPosController extends Controller
     {
         $this->checkPermission($request, 'pos.access');
 
-        $query = Product::with(['category', 'primaryImage', 'variants'])
+        $query = Product::with(['category', 'primaryImage', 'variants' => function ($vq) {
+            $vq->where('is_active', true);
+        }])
             ->where('is_active', true)
             ->latest();
 
@@ -34,6 +36,7 @@ class AdminPosController extends Controller
                   ->orWhere('sku', 'like', "%{$search}%")
                   ->orWhereHas('variants', function ($vq) use ($search) {
                       $vq->where('sku', 'like', "%{$search}%")
+                         ->orWhere('barcode', 'like', "%{$search}%")
                          ->orWhere('name', 'like', "%{$search}%");
                   });
             });
@@ -67,7 +70,7 @@ class AdminPosController extends Controller
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.variant_id' => 'nullable|exists:product_variants,id',
-            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.unit_price' => 'nullable|numeric|min:0',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.discount_amount' => 'nullable|numeric|min:0',
         ]);
@@ -82,12 +85,60 @@ class AdminPosController extends Controller
             $itemsData = [];
 
             foreach ($validated['items'] as $itemInput) {
-                $product = Product::with('primaryImage')->findOrFail($itemInput['product_id']);
-                $variant = !empty($itemInput['variant_id']) ? ProductVariant::find($itemInput['variant_id']) : null;
-                $unitPrice = (float) $itemInput['unit_price'];
                 $quantity = (int) $itemInput['quantity'];
+
+                // Concurrency-safe pessimistic locking
+                $product = Product::where('id', $itemInput['product_id'])->lockForUpdate()->firstOrFail();
+
+                if (!$product->is_active) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'items' => ["Product '{$product->name}' is currently inactive and cannot be sold."],
+                    ]);
+                }
+
+                $variant = null;
+                $unitPrice = (float) $product->price;
+                $variantName = null;
+                $variantAttributes = null;
+
+                if (!empty($itemInput['variant_id'])) {
+                    $variant = ProductVariant::where('id', $itemInput['variant_id'])->lockForUpdate()->firstOrFail();
+
+                    // Catalog Integrity: Variant must belong to product
+                    if ((int) $variant->product_id !== (int) $product->id) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'items' => ["Selected variant does not belong to product '{$product->name}'."],
+                        ]);
+                    }
+
+                    // Catalog Integrity: Active Variant check
+                    if (!$variant->is_active) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'items' => ["Selected variant for product '{$product->name}' is currently inactive and cannot be sold."],
+                        ]);
+                    }
+
+                    // Enforce variant inventory
+                    if ($variant->stock_quantity < $quantity) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'items' => ["Insufficient inventory for variant '{$variant->name}'. Only {$variant->stock_quantity} unit(s) available."],
+                        ]);
+                    }
+
+                    $unitPrice = $variant->effective_price;
+                    $variantName = $variant->name;
+                    $variantAttributes = !empty($variant->variant_attributes) ? $variant->variant_attributes : null;
+                }
+
+                // Enforce parent product inventory
+                if ($product->stock_quantity < $quantity) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'items' => ["Insufficient inventory for product '{$product->name}'. Only {$product->stock_quantity} unit(s) available."],
+                    ]);
+                }
+
                 $itemDiscount = (float) ($itemInput['discount_amount'] ?? 0);
-                $itemTotal = max(0, ($unitPrice * $quantity) - $itemDiscount);
+                $itemTotal = max(0, round(($unitPrice * $quantity) - $itemDiscount, 2));
 
                 $subtotal += $itemTotal;
 
@@ -97,7 +148,8 @@ class AdminPosController extends Controller
                     'product_name' => $product->name,
                     'product_sku' => $variant?->sku ?: $product->sku,
                     'product_image' => $product->primaryImage?->image_url ?? $product->images?->first()?->image_url,
-                    'variant_name' => $variant?->name,
+                    'variant_name' => $variantName,
+                    'variant_attributes' => $variantAttributes,
                     'unit_price' => $unitPrice,
                     'quantity' => $quantity,
                     'discount_amount' => $itemDiscount,

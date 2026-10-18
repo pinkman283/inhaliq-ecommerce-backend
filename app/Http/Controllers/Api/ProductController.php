@@ -15,8 +15,14 @@ class ProductController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $query = Product::with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants'])
-            ->active();
+        $query = Product::with([
+            'category',
+            'subcategory',
+            'brandRelation',
+            'primaryImage',
+            'images',
+            'variants' => fn($q) => $q->where('is_active', true)->with('image'),
+        ])->active();
 
         // Filter by category slug(s) or ID(s) (including all recursive subcategories)
         if ($request->filled('categories') || $request->filled('category')) {
@@ -76,7 +82,7 @@ class ProductController extends Controller
                         ->orWhere('description', 'like', "%{$search}%")
                         ->orWhere('sku', 'like', "%{$search}%")
                         ->orWhereHas('variants', function ($vq) use ($search) {
-                            $vq->where('sku', 'like', "%{$search}%");
+                            $vq->where('is_active', true)->where('sku', 'like', "%{$search}%");
                         })
                         ->orWhereHas('category', function ($cq) use ($search) {
                             $cq->where('name', 'like', "%{$search}%");
@@ -162,7 +168,15 @@ class ProductController extends Controller
     {
         $product = Product::where('slug', $slug)
             ->orWhere('id', $slug)
-            ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants', 'reviews'])
+            ->with([
+                'category',
+                'subcategory',
+                'brandRelation',
+                'primaryImage',
+                'images',
+                'variants' => fn($q) => $q->where('is_active', true)->with('image'),
+                'reviews',
+            ])
             ->firstOrFail();
 
         $reviewsSetting = Setting::where('key', 'reviews_enabled')->first();
@@ -174,7 +188,14 @@ class ProductController extends Controller
         // Get related products from the same category
         $relatedProducts = Product::where('category_id', $product->category_id)
             ->where('id', '!=', $product->id)
-            ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants'])
+            ->with([
+                'category',
+                'subcategory',
+                'brandRelation',
+                'primaryImage',
+                'images',
+                'variants' => fn($q) => $q->where('is_active', true)->with('image'),
+            ])
             ->active()
             ->take(4)
             ->get();
@@ -189,17 +210,17 @@ class ProductController extends Controller
     {
         $data = \Illuminate\Support\Facades\Cache::remember('api_storefront_featured_payload', 60, function () {
             $featuredProducts = Product::featured()
-                ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants'])
+                ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants' => fn($q) => $q->where('is_active', true)->with('image')])
                 ->take(8)
                 ->get();
 
             $newArrivals = Product::newArrivals()
-                ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants'])
+                ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants' => fn($q) => $q->where('is_active', true)->with('image')])
                 ->take(6)
                 ->get();
 
             $bestSellers = Product::bestSellers()
-                ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants'])
+                ->with(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants' => fn($q) => $q->where('is_active', true)->with('image')])
                 ->take(6)
                 ->get();
 

@@ -82,11 +82,11 @@ class PromotionEngine
             $qty = max(1, (int) $ci['quantity']);
             $unitPrice = (float) $product->price;
 
-            // Check variant price modifier if variant present
+            // Check variant price if variant present
             if (!empty($ci['variant_id'])) {
                 $variant = \App\Models\ProductVariant::find($ci['variant_id']);
                 if ($variant && $variant->product_id === $product->id) {
-                    $unitPrice += (float) $variant->price_modifier;
+                    $unitPrice = $variant->effective_price;
                 }
             }
 

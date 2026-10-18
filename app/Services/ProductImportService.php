@@ -52,7 +52,7 @@ class ProductImportService
      * Validate an uploaded CSV file (Dry-Run).
      * Does NOT mutate the database.
      */
-    public function validateUpload(UploadedFile $file, User $user): array
+    public function validateUpload(UploadedFile $file, User $user, array $options = []): array
     {
         self::cleanupExpiredFiles();
 
@@ -93,6 +93,7 @@ class ProductImportService
             'timestamps' => $report['timestamps'], // Snapshot for concurrency stale detection
             'can_commit' => $report['can_commit'],
             'summary' => $report['summary'],
+            'full_replacement' => !empty($options['full_replacement']),
         ];
         Cache::put("catalog_import_{$importToken}", $sessionData, now()->addMinutes(self::SESSION_TTL_MINUTES));
 
@@ -109,7 +110,7 @@ class ProductImportService
     /**
      * Commit the validated import transactionally.
      */
-    public function commitImport(string $importToken, User $user): array
+    public function commitImport(string $importToken, User $user, bool $fullReplacement = false): array
     {
         $storageDir = self::getImportStorageDir();
         $filePath = $storageDir . DIRECTORY_SEPARATOR . $importToken . '.csv';
@@ -120,8 +121,9 @@ class ProductImportService
 
         $sessionData = Cache::get("catalog_import_{$importToken}");
         $expectedTimestamps = $sessionData['timestamps'] ?? [];
+        $isFullReplacement = $fullReplacement || !empty($sessionData['full_replacement']);
 
-        return DB::transaction(function () use ($filePath, $importToken, $user, $expectedTimestamps, $sessionData) {
+        return DB::transaction(function () use ($filePath, $importToken, $user, $expectedTimestamps, $sessionData, $isFullReplacement) {
             // 1. Re-validate the entire file inside the transaction
             $report = $this->parseAndValidateFile($filePath, true, $expectedTimestamps);
 
@@ -145,7 +147,8 @@ class ProductImportService
                     $productsCreated++;
                     $variantsCreated += $createdResult['variants_created'];
                 } elseif ($action === 'UPDATE') {
-                    $updatedResult = $this->executeUpdateProduct($rowData['product'], $rowData['data']);
+                    $rowFullReplacement = !empty($rowData['data']['full_replacement']) || $isFullReplacement;
+                    $updatedResult = $this->executeUpdateProduct($rowData['product'], $rowData['data'], $rowFullReplacement);
                     $productsUpdated++;
                     $variantsCreated += $updatedResult['variants_created'];
                     $variantsUpdated += $updatedResult['variants_updated'];
@@ -309,6 +312,8 @@ class ProductImportService
             $primaryImageUrl = $getField('primary image url') ?? $getField('primary_image_url');
             $additionalImagesJson = $getField('additional image urls') ?? $getField('additional_image_urls');
             $variantSummaryJson = $getField('variant summary') ?? $getField('variant_summary');
+            $optionsVal = $getField('options') ?? $getField('product options') ?? $getField('product_options');
+            $replaceVariantsVal = $getField('replace variants') ?? $getField('replace_variants') ?? $getField('full_replacement');
 
             // --- SKU Validation ---
             if (empty($sku)) {
@@ -394,6 +399,8 @@ class ProductImportService
             // --- Booleans Validation ---
             $parseBool = function ($val, string $fieldName, bool $default = false) use (&$rowErrors, $rowNumber) {
                 if ($val === null || $val === '') return $default;
+                if ($val === true || $val === 1) return true;
+                if ($val === false || $val === 0) return false;
                 $low = strtolower(trim((string)$val));
                 if (in_array($low, ['1', 'true', 'yes', 'y'], true)) return true;
                 if (in_array($low, ['0', 'false', 'no', 'n'], true)) return false;
@@ -405,6 +412,18 @@ class ProductImportService
             $isFeatured = $parseBool($isFeaturedVal, 'Is Featured', false);
             $isNewArrival = $parseBool($isNewArrivalVal, 'Is New Arrival', false);
             $isBestSeller = $parseBool($isBestSellerVal, 'Is Best Seller', false);
+            $isFullReplacementRow = $parseBool($replaceVariantsVal, 'Replace Variants', false);
+
+            // Check existing product in DB early
+            $existingProduct = null;
+            if (!empty($sku)) {
+                $existingProduct = Product::with(['category', 'brandRelation', 'variants', 'images'])
+                    ->where('sku', $sku)
+                    ->first();
+            }
+
+            // --- Options Validation ---
+            $parsedOptions = $this->parseProductOptions($optionsVal, $rowNumber, $rowErrors);
 
             // --- Variants Validation ---
             $parsedVariants = [];
@@ -413,7 +432,19 @@ class ProductImportService
                 if (json_last_error() !== JSON_ERROR_NONE || !is_array($decodedVariants)) {
                     $rowErrors[] = "Row {$rowNumber}: Variant Summary must be a valid JSON array.";
                 } else {
+                    // If options are not explicitly declared in CSV, infer from variants or inherit from existing product
+                    if ($parsedOptions === null) {
+                        $inferred = $this->inferOptionsFromRawVariants($decodedVariants);
+                        if ($inferred !== null) {
+                            $parsedOptions = $inferred;
+                        } elseif ($existingProduct && !empty($existingProduct->options)) {
+                            $parsedOptions = $existingProduct->options;
+                        }
+                    }
+
+                    $isDynamic = !empty($parsedOptions);
                     $seenCombinations = [];
+
                     foreach ($decodedVariants as $vIdx => $v) {
                         $vNumber = $vIdx + 1;
                         if (!is_array($v)) {
@@ -421,20 +452,77 @@ class ProductImportService
                             continue;
                         }
 
+                        $vId = isset($v['id']) && is_numeric($v['id']) ? (int)$v['id'] : null;
+                        if ($vId && $existingProduct) {
+                            if (!$existingProduct->variants->contains('id', $vId)) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant ID {$vId} does not belong to product '{$sku}'.";
+                            }
+                        }
+
                         $vName = trim((string)($v['name'] ?? ''));
                         $vColor = trim((string)($v['color_name'] ?? ($v['color'] ?? '')));
                         $vSize = trim((string)($v['size'] ?? ''));
                         $vSku = trim((string)($v['sku'] ?? ''));
+                        $rawAttrs = $v['attributes'] ?? ($v['variant_attributes'] ?? null);
+                        $vAttributes = $this->normalizeVariantAttributes($rawAttrs);
 
-                        if ($vName === '' && $vColor === '' && $vSize === '') {
-                            $rowErrors[] = "Row {$rowNumber}: Variant #{$vNumber} must have at least a name, color, or size.";
+                        if ($rawAttrs !== null && $vAttributes === null) {
+                            $rowErrors[] = "Row {$rowNumber}: Variant #{$vNumber} has invalid attributes format.";
+                        }
+
+                        // For dynamic variants, attributes are required
+                        if ($isDynamic) {
+                            if (empty($vAttributes)) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant #{$vNumber} ('{$vName}') is missing attributes for dynamic options.";
+                            } else {
+                                // Validate each declared option group
+                                foreach ($parsedOptions as $optGroup) {
+                                    $grpName = $optGroup['name'];
+                                    $grpNameLower = strtolower($grpName);
+                                    $allowedVals = array_map('strtolower', $optGroup['values']);
+
+                                    // Find attribute key case-insensitively
+                                    $foundVal = null;
+                                    foreach ($vAttributes as $ak => $av) {
+                                        if (strtolower(trim((string)$ak)) === $grpNameLower) {
+                                            $foundVal = trim((string)$av);
+                                            break;
+                                        }
+                                    }
+
+                                    if ($foundVal === null || $foundVal === '') {
+                                        $rowErrors[] = "Row {$rowNumber}: Variant #{$vNumber} ('{$vName}') missing attribute '{$grpName}'.";
+                                    } elseif (!in_array(strtolower($foundVal), $allowedVals, true)) {
+                                        $rowErrors[] = "Row {$rowNumber}: Invalid value '{$foundVal}' for option group '{$grpName}'. Allowed values: " . implode(', ', $optGroup['values']) . ".";
+                                    }
+                                }
+
+                                // Check for unknown attributes
+                                $declaredGroupNamesLower = array_map(fn($g) => strtolower($g['name']), $parsedOptions);
+                                foreach ($vAttributes as $ak => $av) {
+                                    if (!in_array(strtolower(trim((string)$ak)), $declaredGroupNamesLower, true)) {
+                                        $rowErrors[] = "Row {$rowNumber}: Unknown attribute '{$ak}' for variant #{$vNumber}. Only declared options are allowed.";
+                                    }
+                                }
+                            }
+                        }
+
+                        if ($vName === '' && $vColor === '' && $vSize === '' && empty($vAttributes)) {
+                            $rowErrors[] = "Row {$rowNumber}: Variant #{$vNumber} must have at least a name, color, size, or attributes.";
                         }
 
                         // Combination uniqueness check
-                        if ($vColor !== '' || $vSize !== '') {
-                            $comboKey = strtolower($vColor) . '|' . strtolower($vSize);
+                        $comboKey = $this->getCanonicalVariantKey([
+                            'attributes' => $vAttributes,
+                            'color_name' => $vColor,
+                            'size' => $vSize,
+                            'name' => $vName,
+                        ], $isDynamic);
+
+                        if ($comboKey !== '') {
                             if (isset($seenCombinations[$comboKey])) {
-                                $rowErrors[] = "Row {$rowNumber}: Duplicate variant combination '{$vColor} / {$vSize}' in variant list.";
+                                $comboDisplay = $vAttributes ? implode(' / ', $vAttributes) : ($vColor . ($vSize ? ' / ' . $vSize : ''));
+                                $rowErrors[] = "Row {$rowNumber}: Duplicate variant combination '{$comboDisplay}' in variant list.";
                             }
                             $seenCombinations[$comboKey] = true;
                         }
@@ -448,26 +536,77 @@ class ProductImportService
                             }
                         }
 
-                        // Numeric validation for variant price modifier & cost
-                        if (isset($v['price_modifier']) && $v['price_modifier'] !== '' && !is_numeric($v['price_modifier'])) {
-                            $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' price modifier must be numeric.";
-                        } elseif (isset($v['price_modifier']) && (float)$v['price_modifier'] < 0) {
-                            $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' price modifier cannot be negative.";
+                        // Direct price validation
+                        $vPrice = null;
+                        if (isset($v['price']) && $v['price'] !== '' && $v['price'] !== null) {
+                            if (!is_numeric($v['price'])) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' price must be numeric.";
+                            } elseif ((float)$v['price'] < 0) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' price cannot be negative.";
+                            } else {
+                                $vPrice = (float)$v['price'];
+                            }
                         }
 
-                        if (isset($v['cost_price']) && $v['cost_price'] !== '' && $v['cost_price'] !== null && !is_numeric($v['cost_price'])) {
-                            $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' cost price must be numeric.";
+                        // Numeric validation for variant price modifier & cost
+                        $vPriceModifier = 0.00;
+                        if (isset($v['price_modifier']) && $v['price_modifier'] !== '' && $v['price_modifier'] !== null) {
+                            if (!is_numeric($v['price_modifier'])) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' price modifier must be numeric.";
+                            } elseif ((float)$v['price_modifier'] < 0) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' price modifier cannot be negative.";
+                            } else {
+                                $vPriceModifier = (float)$v['price_modifier'];
+                            }
                         }
+
+                        $vCostPrice = null;
+                        if (isset($v['cost_price']) && $v['cost_price'] !== '' && $v['cost_price'] !== null) {
+                            if (!is_numeric($v['cost_price'])) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' cost price must be numeric.";
+                            } elseif ((float)$v['cost_price'] < 0) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' cost price cannot be negative.";
+                            } else {
+                                $vCostPrice = (float)$v['cost_price'];
+                            }
+                        }
+
+                        // Stock quantity validation
+                        $vStock = null;
+                        if (isset($v['stock_quantity']) && $v['stock_quantity'] !== '' && $v['stock_quantity'] !== null) {
+                            if (!is_numeric($v['stock_quantity'])) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' stock quantity must be numeric.";
+                            } elseif ((int)$v['stock_quantity'] < 0) {
+                                $rowErrors[] = "Row {$rowNumber}: Variant '{$vName}' stock quantity cannot be negative.";
+                            } else {
+                                $vStock = (int)$v['stock_quantity'];
+                            }
+                        }
+
+                        // Active boolean validation
+                        $vIsActive = true;
+                        if (isset($v['is_active']) && $v['is_active'] !== '' && $v['is_active'] !== null) {
+                            $vIsActive = $parseBool($v['is_active'], "Variant '{$vName}' is_active", true);
+                        }
+
+                        $autoName = $vName ?: ($vAttributes ? implode(' / ', array_values($vAttributes)) : ($vColor ? ($vColor . ($vSize ? ' / ' . $vSize : '')) : ($vSize ?: 'Standard Option')));
 
                         $parsedVariants[] = [
+                            'id' => $vId,
                             'sku' => $vSku ?: null,
-                            'name' => $vName ?: ($vColor ? ($vColor . ($vSize ? ' / ' . $vSize : '')) : ($vSize ?: 'Standard Option')),
-                            'color_name' => $vColor ?: null,
+                            'name' => $autoName,
+                            'color_name' => $vColor ?: ($vAttributes['Color'] ?? $vAttributes['color'] ?? null),
                             'color_hex' => !empty($v['color_hex']) ? trim((string)$v['color_hex']) : null,
-                            'size' => $vSize ?: null,
-                            'price_modifier' => isset($v['price_modifier']) ? (float)$v['price_modifier'] : 0.00,
-                            'cost_price' => isset($v['cost_price']) && $v['cost_price'] !== '' && $v['cost_price'] !== null ? (float)$v['cost_price'] : null,
+                            'size' => $vSize ?: ($vAttributes['Size'] ?? $vAttributes['size'] ?? null),
+                            'price' => $vPrice,
+                            'price_modifier' => $vPriceModifier,
+                            'cost_price' => $vCostPrice,
+                            'stock_quantity' => $vStock,
                             'barcode' => !empty($v['barcode']) ? trim((string)$v['barcode']) : null,
+                            'attributes' => $vAttributes,
+                            'image_id' => !empty($v['image_id']) && is_numeric($v['image_id']) ? (int)$v['image_id'] : null,
+                            'image_url' => !empty($v['image_url']) ? trim((string)$v['image_url']) : null,
+                            'is_active' => $vIsActive,
                         ];
                     }
                 }
@@ -515,11 +654,6 @@ class ProductImportService
                 continue;
             }
 
-            // Check existing product in DB
-            $existingProduct = Product::with(['category', 'brandRelation', 'variants', 'images'])
-                ->where('sku', $sku)
-                ->first();
-
             if (!$existingProduct) {
                 // CREATE
                 $creates++;
@@ -542,6 +676,7 @@ class ProductImportService
                     'is_best_seller' => $isBestSeller,
                     'primary_image_url' => $primaryImageUrl,
                     'additional_images' => $parsedAdditionalImages,
+                    'options' => $parsedOptions,
                     'variants' => $parsedVariants,
                 ];
 
@@ -727,6 +862,16 @@ class ProductImportService
                     ];
                 }
 
+                // Check options diff
+                if ($parsedOptions !== null && json_encode($existingProduct->options) !== json_encode($parsedOptions)) {
+                    $diff['options'] = [
+                        'old' => $existingProduct->options ? json_encode($existingProduct->options) : '(none)',
+                        'new' => json_encode($parsedOptions),
+                        'from' => $existingProduct->options ? json_encode($existingProduct->options) : '(none)',
+                        'to' => json_encode($parsedOptions),
+                    ];
+                }
+
                 // Check variants diff
                 $hasVariantChanges = false;
                 if (!empty($parsedVariants)) {
@@ -734,17 +879,27 @@ class ProductImportService
                     if ($existingVariants->count() !== count($parsedVariants)) {
                         $hasVariantChanges = true;
                     } else {
-                        // Check if any variant modified
                         foreach ($parsedVariants as $pv) {
-                            $match = $existingVariants->first(function ($ev) use ($pv) {
-                                return ($pv['sku'] && $ev->sku === $pv['sku'])
-                                    || ($ev->name === $pv['name'])
-                                    || ($ev->color_name === $pv['color_name'] && $ev->size === $pv['size']);
-                            });
+                            $match = null;
+                            if (!empty($pv['id'])) {
+                                $match = $existingVariants->firstWhere('id', $pv['id']);
+                            }
+                            if (!$match && !empty($pv['sku'])) {
+                                $match = $existingVariants->firstWhere('sku', $pv['sku']);
+                            }
+                            if (!$match) {
+                                $k = $this->getCanonicalVariantKey($pv, $isDynamic);
+                                $match = $existingVariants->first(function ($ev) use ($k, $isDynamic) {
+                                    return $this->getCanonicalVariantKey($ev, $isDynamic) === $k;
+                                });
+                            }
                             if (!$match 
                                 || (float)$match->price_modifier !== (float)$pv['price_modifier']
+                                || ($pv['price'] !== null && (float)$match->price !== (float)$pv['price'])
+                                || ($pv['is_active'] !== null && (bool)$match->is_active !== (bool)$pv['is_active'])
                                 || $match->name !== $pv['name']
                                 || ($pv['cost_price'] !== null && (float)$match->cost_price !== (float)$pv['cost_price'])
+                                || ($pv['barcode'] !== null && $match->barcode !== $pv['barcode'])
                             ) {
                                 $hasVariantChanges = true;
                                 break;
@@ -777,7 +932,9 @@ class ProductImportService
                     'is_featured' => $isFeatured,
                     'is_new_arrival' => $isNewArrival,
                     'is_best_seller' => $isBestSeller,
+                    'options' => $parsedOptions !== null ? $parsedOptions : $existingProduct->options,
                     'variants' => $parsedVariants,
+                    'full_replacement' => $isFullReplacementRow,
                 ];
 
                 if (empty($diff)) {
@@ -853,6 +1010,7 @@ class ProductImportService
             'is_best_seller' => $data['is_best_seller'],
             'rating_average' => 0.00,
             'review_count' => 0,
+            'options' => $data['options'] ?? null,
         ]);
 
         // Attach Primary Image if provided
@@ -878,10 +1036,18 @@ class ProductImportService
             }
         }
 
+        $productImages = $product->images()->get();
+
         // Create variants if present
         $variantsCreated = 0;
         if ($hasVariants) {
             foreach ($data['variants'] as $v) {
+                $vStock = isset($v['stock_quantity']) && $v['stock_quantity'] !== '' && $v['stock_quantity'] !== null
+                    ? (int)$v['stock_quantity']
+                    : 0;
+
+                $resolvedImageId = $this->resolveVariantImageId($v, $productImages, null);
+
                 $product->variants()->create([
                     'sku' => $v['sku'] ?: ($product->sku . '-' . strtoupper(Str::random(4))),
                     'name' => $v['name'],
@@ -889,9 +1055,13 @@ class ProductImportService
                     'color_hex' => $v['color_hex'],
                     'size' => $v['size'],
                     'price_modifier' => $v['price_modifier'],
+                    'price' => $v['price'],
                     'cost_price' => $v['cost_price'],
                     'barcode' => $v['barcode'],
-                    'stock_quantity' => 0,
+                    'stock_quantity' => $vStock,
+                    'is_active' => $v['is_active'] ?? true,
+                    'attributes' => $v['attributes'] ?? null,
+                    'image_id' => $resolvedImageId,
                 ]);
                 $variantsCreated++;
             }
@@ -905,7 +1075,7 @@ class ProductImportService
      * Update an existing product from validated import data.
      * Preserves existing product IDs and existing variant IDs.
      */
-    protected function executeUpdateProduct(Product $product, array $data): array
+    protected function executeUpdateProduct(Product $product, array $data, bool $isFullReplacement = false): array
     {
         $product->update([
             'name' => $data['name'],
@@ -922,7 +1092,7 @@ class ProductImportService
             'is_featured' => $data['is_featured'],
             'is_new_arrival' => $data['is_new_arrival'],
             'is_best_seller' => $data['is_best_seller'],
-            // stock_quantity is NOT directly overwritten on update (stock safety rule)
+            'options' => array_key_exists('options', $data) ? $data['options'] : $product->options,
         ]);
 
         $variantsCreated = 0;
@@ -930,50 +1100,131 @@ class ProductImportService
 
         // Reconcile variants if present in CSV
         if (!empty($data['variants'])) {
-            $existingVariants = $product->variants()->get();
+            $existingVariants = $product->variants()->get()->keyBy('id');
+            $keptIds = [];
+            $isDynamic = !empty($data['options']) && is_array($data['options']) && count($data['options']) > 0;
+            $productImages = $product->images()->get();
 
+            // Pass 1: Match by explicit ID if provided
             foreach ($data['variants'] as $v) {
-                // Match existing variant by SKU or combination
-                $matched = null;
-                if (!empty($v['sku'])) {
-                    $matched = $existingVariants->firstWhere('sku', $v['sku']);
-                }
-                if (!$matched && (!empty($v['color_name']) || !empty($v['size']))) {
-                    $matched = $existingVariants->first(function ($ev) use ($v) {
-                        return $ev->color_name === $v['color_name'] && $ev->size === $v['size'];
-                    });
-                }
-                if (!$matched) {
-                    $matched = $existingVariants->firstWhere('name', $v['name']);
-                }
+                if (!empty($v['id']) && $existingVariants->has((int)$v['id'])) {
+                    $matched = $existingVariants->get((int)$v['id']);
+                    $vStock = isset($v['stock_quantity']) && $v['stock_quantity'] !== '' && $v['stock_quantity'] !== null
+                        ? (int)$v['stock_quantity']
+                        : $matched->stock_quantity;
 
-                if ($matched) {
-                    // Update in-place PRESERVING the existing variant ID
+                    $resolvedImageId = $this->resolveVariantImageId($v, $productImages, $matched->image_id);
+
                     $matched->update([
                         'name' => $v['name'],
                         'color_name' => $v['color_name'],
-                        'color_hex' => $v['color_hex'],
+                        'color_hex' => $v['color_hex'] ?? $matched->color_hex,
                         'size' => $v['size'],
                         'price_modifier' => $v['price_modifier'],
-                        'cost_price' => $v['cost_price'],
-                        'barcode' => $v['barcode'],
-                        // stock_quantity preserved
+                        'price' => $v['price'],
+                        'cost_price' => $v['cost_price'] ?? $matched->cost_price,
+                        'barcode' => $v['barcode'] ?? $matched->barcode,
+                        'stock_quantity' => $vStock,
+                        'is_active' => $v['is_active'] ?? true,
+                        'attributes' => $v['attributes'] ?? $matched->attributes,
+                        'image_id' => $resolvedImageId,
+                        'sku' => $v['sku'] ?: $matched->sku,
                     ]);
+
+                    $keptIds[] = $matched->id;
+                    $variantsUpdated++;
+                }
+            }
+
+            // Pass 2: Match remaining variants by SKU, combination key, or name
+            $unmatchedExisting = $existingVariants->except($keptIds);
+
+            foreach ($data['variants'] as $v) {
+                if (!empty($v['id']) && in_array((int)$v['id'], $keptIds, true)) {
+                    continue; // Handled in pass 1
+                }
+
+                $matched = null;
+                if (!empty($v['sku'])) {
+                    $matched = $unmatchedExisting->firstWhere('sku', $v['sku']);
+                }
+
+                if (!$matched) {
+                    $incomingKey = $this->getCanonicalVariantKey($v, $isDynamic);
+                    if ($incomingKey !== '') {
+                        foreach ($unmatchedExisting as $candidate) {
+                            $candidateKey = $this->getCanonicalVariantKey($candidate, $isDynamic);
+                            if ($candidateKey !== '' && $candidateKey === $incomingKey) {
+                                $matched = $candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!$matched && !empty($v['name'])) {
+                    $matched = $unmatchedExisting->firstWhere('name', $v['name']);
+                }
+
+                if ($matched) {
+                    $vStock = isset($v['stock_quantity']) && $v['stock_quantity'] !== '' && $v['stock_quantity'] !== null
+                        ? (int)$v['stock_quantity']
+                        : $matched->stock_quantity;
+
+                    $resolvedImageId = $this->resolveVariantImageId($v, $productImages, $matched->image_id);
+
+                    $matched->update([
+                        'name' => $v['name'],
+                        'color_name' => $v['color_name'],
+                        'color_hex' => $v['color_hex'] ?? $matched->color_hex,
+                        'size' => $v['size'],
+                        'price_modifier' => $v['price_modifier'],
+                        'price' => $v['price'],
+                        'cost_price' => $v['cost_price'] ?? $matched->cost_price,
+                        'barcode' => $v['barcode'] ?? $matched->barcode,
+                        'stock_quantity' => $vStock,
+                        'is_active' => $v['is_active'] ?? true,
+                        'attributes' => $v['attributes'] ?? $matched->attributes,
+                        'image_id' => $resolvedImageId,
+                        'sku' => $v['sku'] ?: $matched->sku,
+                    ]);
+
+                    $keptIds[] = $matched->id;
+                    $unmatchedExisting->forget($matched->id);
                     $variantsUpdated++;
                 } else {
-                    // Create new variant
-                    $product->variants()->create([
+                    $vStock = isset($v['stock_quantity']) && $v['stock_quantity'] !== '' && $v['stock_quantity'] !== null
+                        ? (int)$v['stock_quantity']
+                        : 0;
+
+                    $resolvedImageId = $this->resolveVariantImageId($v, $productImages, null);
+
+                    $newV = $product->variants()->create([
                         'sku' => $v['sku'] ?: ($product->sku . '-' . strtoupper(Str::random(4))),
                         'name' => $v['name'],
                         'color_name' => $v['color_name'],
                         'color_hex' => $v['color_hex'],
                         'size' => $v['size'],
                         'price_modifier' => $v['price_modifier'],
+                        'price' => $v['price'],
                         'cost_price' => $v['cost_price'],
                         'barcode' => $v['barcode'],
-                        'stock_quantity' => 0,
+                        'stock_quantity' => $vStock,
+                        'is_active' => $v['is_active'] ?? true,
+                        'attributes' => $v['attributes'] ?? null,
+                        'image_id' => $resolvedImageId,
                     ]);
+
+                    $keptIds[] = $newV->id;
                     $variantsCreated++;
+                }
+            }
+
+            // Safe soft deactivation ONLY for complete replacement imports
+            if ($isFullReplacement) {
+                $omitted = $existingVariants->except($keptIds);
+                foreach ($omitted as $ov) {
+                    $ov->update(['is_active' => false]);
                 }
             }
 
@@ -985,5 +1236,266 @@ class ProductImportService
             'variants_created' => $variantsCreated,
             'variants_updated' => $variantsUpdated,
         ];
+    }
+
+    /**
+     * Parse and validate product options definition from CSV.
+     * Supports:
+     * 1. JSON string: [{"name":"Color","values":["Black","White"]}] or {"Color":["Black","White"]}
+     * 2. Human-readable string: "Color: Black, White | Storage: 128GB, 256GB"
+     */
+    protected function parseProductOptions(?string $rawOptions, int $rowNumber, array &$rowErrors): ?array
+    {
+        if ($rawOptions === null || trim($rawOptions) === '') {
+            return null;
+        }
+
+        $trimmed = trim($rawOptions);
+
+        // Try JSON decode first
+        if (str_starts_with($trimmed, '[') || str_starts_with($trimmed, '{')) {
+            $decoded = json_decode($trimmed, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                // If format is associative array {"Color": ["Black", "White"]}
+                if (!empty($decoded) && !isset($decoded[0])) {
+                    $normalized = [];
+                    foreach ($decoded as $optName => $vals) {
+                        $normalized[] = [
+                            'name' => trim((string)$optName),
+                            'values' => is_array($vals) ? array_values(array_map('trim', $vals)) : array_map('trim', explode(',', (string)$vals)),
+                        ];
+                    }
+                    $decoded = $normalized;
+                }
+
+                // Validate each option group
+                $seenNames = [];
+                $validGroups = [];
+                foreach ($decoded as $grp) {
+                    if (!is_array($grp) || empty($grp['name']) || empty($grp['values']) || !is_array($grp['values'])) {
+                        $rowErrors[] = "Row {$rowNumber}: Malformed options JSON structure. Each group must contain 'name' and non-empty 'values' array.";
+                        return null;
+                    }
+                    $name = trim((string)$grp['name']);
+                    $lowerName = strtolower($name);
+                    if (isset($seenNames[$lowerName])) {
+                        $rowErrors[] = "Row {$rowNumber}: Duplicate option group '{$name}'.";
+                        return null;
+                    }
+                    $seenNames[$lowerName] = true;
+
+                    $values = array_values(array_unique(array_filter(array_map(fn($v) => trim((string)$v), $grp['values']), fn($v) => $v !== '')));
+                    if (empty($values)) {
+                        $rowErrors[] = "Row {$rowNumber}: Option group '{$name}' must contain at least one non-empty value.";
+                        return null;
+                    }
+                    $validGroups[] = [
+                        'name' => $name,
+                        'values' => $values,
+                    ];
+                }
+                return $validGroups;
+            }
+        }
+
+        // Parse human-readable delimited format: "Color: Black, White | Storage: 128GB, 256GB"
+        $parts = preg_split('/[\|\n\r;]+/', $trimmed);
+        $validGroups = [];
+        $seenNames = [];
+
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if ($part === '') continue;
+
+            $colonPos = strpos($part, ':');
+            if ($colonPos === false) {
+                $rowErrors[] = "Row {$rowNumber}: Malformed option group '{$part}'. Expected format 'OptionName: val1, val2'.";
+                return null;
+            }
+
+            $optName = trim(substr($part, 0, $colonPos));
+            $valsStr = trim(substr($part, $colonPos + 1));
+
+            if ($optName === '') {
+                $rowErrors[] = "Row {$rowNumber}: Option group name cannot be empty.";
+                return null;
+            }
+
+            $lowerName = strtolower($optName);
+            if (isset($seenNames[$lowerName])) {
+                $rowErrors[] = "Row {$rowNumber}: Duplicate option group '{$optName}'.";
+                return null;
+            }
+            $seenNames[$lowerName] = true;
+
+            $values = array_values(array_unique(array_filter(array_map('trim', explode(',', $valsStr)), fn($v) => $v !== '')));
+            if (empty($values)) {
+                $rowErrors[] = "Row {$rowNumber}: Option group '{$optName}' must contain at least one non-empty value.";
+                return null;
+            }
+
+            $validGroups[] = [
+                'name' => $optName,
+                'values' => $values,
+            ];
+        }
+
+        if (empty($validGroups)) {
+            $rowErrors[] = "Row {$rowNumber}: Options column is malformed or empty.";
+            return null;
+        }
+
+        return $validGroups;
+    }
+
+    /**
+     * Normalize variant attributes structure from CSV.
+     */
+    protected function normalizeVariantAttributes(mixed $rawAttrs): ?array
+    {
+        if (empty($rawAttrs)) {
+            return null;
+        }
+
+        if (is_string($rawAttrs)) {
+            $trimmed = trim($rawAttrs);
+            if (str_starts_with($trimmed, '{')) {
+                $decoded = json_decode($trimmed, true);
+                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                    $rawAttrs = $decoded;
+                }
+            } else {
+                $parts = preg_split('/[\|\n\r,]+/', $trimmed);
+                $parsed = [];
+                foreach ($parts as $part) {
+                    if (str_contains($part, ':')) {
+                        [$k, $v] = explode(':', $part, 2);
+                        $kTrim = trim($k);
+                        $vTrim = trim($v);
+                        if ($kTrim !== '' && $vTrim !== '') {
+                            $parsed[$kTrim] = $vTrim;
+                        }
+                    }
+                }
+                if (!empty($parsed)) {
+                    return $parsed;
+                }
+            }
+        }
+
+        if (is_array($rawAttrs)) {
+            $normalized = [];
+            foreach ($rawAttrs as $k => $v) {
+                $kTrim = trim((string)$k);
+                if ($kTrim === '') continue;
+                if (is_array($v) || is_object($v)) {
+                    return null; // Malformed nested attribute
+                }
+                $vTrim = trim((string)$v);
+                $normalized[$kTrim] = $vTrim;
+            }
+            return !empty($normalized) ? $normalized : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Infer option groups by scanning all variant attributes in a product.
+     */
+    protected function inferOptionsFromRawVariants(array $variants): ?array
+    {
+        $optionsMap = [];
+        foreach ($variants as $v) {
+            $rawAttrs = $v['attributes'] ?? ($v['variant_attributes'] ?? null);
+            $attrs = $this->normalizeVariantAttributes($rawAttrs);
+            if (!is_array($attrs)) continue;
+            foreach ($attrs as $k => $val) {
+                $lowerKey = strtolower(trim((string)$k));
+                if (!isset($optionsMap[$lowerKey])) {
+                    $optionsMap[$lowerKey] = [
+                        'name' => trim((string)$k),
+                        'values' => [],
+                    ];
+                }
+                $valTrim = trim((string)$val);
+                if ($valTrim !== '' && !in_array($valTrim, $optionsMap[$lowerKey]['values'], true)) {
+                    $optionsMap[$lowerKey]['values'][] = $valTrim;
+                }
+            }
+        }
+
+        if (empty($optionsMap)) {
+            return null;
+        }
+
+        return array_values($optionsMap);
+    }
+
+    /**
+     * Compute a deterministic canonical combination key for variant matching.
+     */
+    protected function getCanonicalVariantKey(array|ProductVariant $variant, bool $isDynamic): string
+    {
+        if ($isDynamic) {
+            $attrs = is_array($variant)
+                ? ($variant['attributes'] ?? ($variant['variant_attributes'] ?? []))
+                : ($variant->attributes ?? []);
+            if (!is_array($attrs) || empty($attrs)) {
+                return '';
+            }
+            $pairs = [];
+            foreach ($attrs as $k => $v) {
+                $kTrim = strtolower(trim((string)$k));
+                $vTrim = strtolower(trim((string)$v));
+                if ($kTrim !== '') {
+                    $pairs[$kTrim] = $vTrim;
+                }
+            }
+            ksort($pairs);
+            $parts = [];
+            foreach ($pairs as $k => $v) {
+                $parts[] = "{$k}={$v}";
+            }
+            return implode('|', $parts);
+        }
+
+        $colorName = is_array($variant)
+            ? (isset($variant['color_name']) && $variant['color_name'] !== null ? trim((string)$variant['color_name']) : '')
+            : (isset($variant->color_name) && $variant->color_name !== null ? trim((string)$variant->color_name) : '');
+
+        $size = is_array($variant)
+            ? (isset($variant['size']) && $variant['size'] !== null ? trim((string)$variant['size']) : '')
+            : (isset($variant->size) && $variant->size !== null ? trim((string)$variant->size) : '');
+
+        if ($colorName !== '' || $size !== '') {
+            return strtolower($colorName) . '|' . strtolower($size);
+        }
+
+        $name = is_array($variant) ? ($variant['name'] ?? '') : ($variant->name ?? '');
+        return 'name:' . strtolower(trim((string)$name));
+    }
+
+    /**
+     * Resolve variant image_id from image_id or image_url.
+     */
+    protected function resolveVariantImageId(array $variantData, $productImages, ?int $fallbackId = null): ?int
+    {
+        if (!empty($variantData['image_id'])) {
+            $imgId = (int)$variantData['image_id'];
+            if ($productImages->contains('id', $imgId)) {
+                return $imgId;
+            }
+        }
+
+        if (!empty($variantData['image_url'])) {
+            $url = trim((string)$variantData['image_url']);
+            $matchedImg = $productImages->first(fn($img) => $img->image_url === $url);
+            if ($matchedImg) {
+                return $matchedImg->id;
+            }
+        }
+
+        return $fallbackId;
     }
 }

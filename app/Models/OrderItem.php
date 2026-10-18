@@ -29,6 +29,7 @@ class OrderItem extends Model
         'total_price',
         'net_total',
         'gross_profit',
+        'variant_attributes',
     ];
 
     protected $hidden = [
@@ -47,6 +48,7 @@ class OrderItem extends Model
         'total_price' => 'float',
         'net_total' => 'float',
         'gross_profit' => 'float',
+        'variant_attributes' => 'array',
     ];
 
     public function getNetUnitPriceAttribute(): float

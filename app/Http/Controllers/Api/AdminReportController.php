@@ -640,12 +640,12 @@ class AdminReportController extends Controller
     {
         $coupons = Coupon::all();
         $orders = Order::whereBetween('created_at', [$start, $end])
-            ->whereNotNull('coupon_id')
+            ->whereNotNull('coupon_code')
             ->get();
 
         $rows = [];
         foreach ($coupons as $c) {
-            $matched = $orders->where('coupon_id', $c->id);
+            $matched = $orders->where('coupon_code', $c->code);
             $redemptions = $matched->count();
             $surrendered = (float) $matched->sum('discount_amount');
             $revenueGen = (float) $matched->sum('total_amount');

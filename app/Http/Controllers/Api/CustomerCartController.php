@@ -39,9 +39,9 @@ class CustomerCartController extends Controller
 
             // Variant validation
             $variant = $cartItem->variant;
-            if ($cartItem->variant_id && (!$variant || $variant->product_id !== $product->id)) {
+            if ($cartItem->variant_id && (!$variant || $variant->product_id !== $product->id || !$variant->is_active)) {
                 $cartItem->delete();
-                $notices[] = "A product option in your saved cart is no longer valid and was removed.";
+                $notices[] = "A product option in your saved cart is no longer active or valid and was removed.";
                 continue;
             }
 
@@ -63,7 +63,7 @@ class CustomerCartController extends Controller
                 $notices[] = "Quantity for {$product->name} was adjusted to available stock ({$availableStock}).";
             }
 
-            $unitPrice = (float) $product->price + ($variant ? (float) $variant->price_modifier : 0.00);
+            $unitPrice = $variant ? $variant->effective_price : (float) $product->price;
             $totalPrice = round($unitPrice * $currentQty, 2);
             $runningSubtotal += $totalPrice;
 
@@ -95,6 +95,10 @@ class CustomerCartController extends Controller
                     'color_name' => $variant->color_name,
                     'size' => $variant->size,
                     'price_modifier' => (float) $variant->price_modifier,
+                    'price' => $variant->price !== null ? (float) $variant->price : null,
+                    'effective_price' => $variant->effective_price,
+                    'attributes' => $variant->attributes ?: null,
+                    'is_active' => (bool) $variant->is_active,
                     'stock_quantity' => (int) $variant->stock_quantity,
                 ] : null,
             ];
@@ -156,7 +160,7 @@ class CustomerCartController extends Controller
 
             $products = Product::whereIn('id', $productIds)->where('is_active', true)->get()->keyBy('id');
             $variants = !empty($variantIds)
-                ? ProductVariant::whereIn('id', $variantIds)->get()->keyBy('id')
+                ? ProductVariant::whereIn('id', $variantIds)->where('is_active', true)->get()->keyBy('id')
                 : collect([]);
 
             foreach ($aggregated as $item) {
@@ -166,7 +170,7 @@ class CustomerCartController extends Controller
                 }
 
                 $variant = $item['variant_id'] ? $variants->get($item['variant_id']) : null;
-                if ($item['variant_id'] && (!$variant || $variant->product_id !== $product->id)) {
+                if ($item['variant_id'] && (!$variant || $variant->product_id !== $product->id || !$variant->is_active)) {
                     continue;
                 }
 
@@ -254,7 +258,7 @@ class CustomerCartController extends Controller
 
             $products = Product::whereIn('id', $productIds)->where('is_active', true)->get()->keyBy('id');
             $variants = !empty($variantIds)
-                ? ProductVariant::whereIn('id', $variantIds)->get()->keyBy('id')
+                ? ProductVariant::whereIn('id', $variantIds)->where('is_active', true)->get()->keyBy('id')
                 : collect([]);
 
             foreach ($aggregated as $item) {
@@ -264,7 +268,7 @@ class CustomerCartController extends Controller
                 }
 
                 $variant = $item['variant_id'] ? $variants->get($item['variant_id']) : null;
-                if ($item['variant_id'] && (!$variant || $variant->product_id !== $product->id)) {
+                if ($item['variant_id'] && (!$variant || $variant->product_id !== $product->id || !$variant->is_active)) {
                     continue;
                 }
 

@@ -49,6 +49,15 @@ class AdminVendorProductController extends Controller
             'notes' => 'nullable|string|max:1000',
         ]);
 
+        if (!empty($validated['variant_id'])) {
+            $variant = \App\Models\ProductVariant::find($validated['variant_id']);
+            if (!$variant || (int) $variant->product_id !== (int) $validated['product_id']) {
+                return response()->json([
+                    'message' => 'The selected variant does not belong to the specified product.',
+                ], 422);
+            }
+        }
+
         $existing = VendorProduct::where('vendor_id', $validated['vendor_id'])
             ->where('product_id', $validated['product_id'])
             ->where('variant_id', $validated['variant_id'] ?? null)

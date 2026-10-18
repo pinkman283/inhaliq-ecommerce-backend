@@ -23,6 +23,11 @@ class AdminInventoryMovementController extends Controller
                   ->orWhereHas('product', function ($pq) use ($search) {
                       $pq->where('name', 'like', "%{$search}%")
                          ->orWhere('sku', 'like', "%{$search}%");
+                  })
+                  ->orWhereHas('variant', function ($vq) use ($search) {
+                      $vq->where('name', 'like', "%{$search}%")
+                         ->orWhere('sku', 'like', "%{$search}%")
+                         ->orWhere('barcode', 'like', "%{$search}%");
                   });
             });
         }
@@ -33,6 +38,10 @@ class AdminInventoryMovementController extends Controller
 
         if ($request->filled('product_id')) {
             $query->where('product_id', $request->input('product_id'));
+        }
+
+        if ($request->filled('variant_id')) {
+            $query->where('variant_id', $request->input('variant_id'));
         }
 
         if ($request->filled('date_from')) {

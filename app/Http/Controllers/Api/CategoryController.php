@@ -37,7 +37,7 @@ class CategoryController extends Controller
         $category = Category::where('slug', $slug)
             ->orWhere('id', $slug)
             ->withCount('products')
-            ->with(['products' => fn($q) => $q->with(['primaryImage', 'variants'])->take(12)])
+            ->with(['products' => fn($q) => $q->active()->with(['primaryImage', 'variants' => fn($vq) => $vq->where('is_active', true)->with('image')])->take(12)])
             ->firstOrFail();
 
         return response()->json($category);

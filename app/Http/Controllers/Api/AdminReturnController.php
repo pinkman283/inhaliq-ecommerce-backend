@@ -32,6 +32,7 @@ class AdminReturnController extends Controller
             'shipment:id,provider,consignment_id,tracking_code,status',
             'items.product:id,name,sku',
             'items.product.primaryImage',
+            'items.variant',
         ]);
 
         $tab = $request->query('tab', 'all');

@@ -16,6 +16,8 @@ class ProductVariantResource extends JsonResource
      */
     public function toArray(Request $request): array
     {
+        $imageUrl = $this->resolveImageUrl();
+
         return [
             'id' => (int) $this->id,
             'product_id' => (int) $this->product_id,
@@ -26,7 +28,14 @@ class ProductVariantResource extends JsonResource
             'sku' => $this->sku !== null ? (string) $this->sku : null,
             'barcode' => $this->barcode !== null ? (string) $this->barcode : null,
             'price_modifier' => (float) ($this->price_modifier ?? 0),
+            'price' => $this->price !== null ? (float) $this->price : null,
+            'effective_price' => (float) $this->effective_price,
             'stock_quantity' => (int) ($this->stock_quantity ?? 0),
+            'attributes' => is_array($this->attributes) ? $this->attributes : ($this->attributes ? json_decode((string) $this->attributes, true) : null),
+            'image_id' => $this->image_id !== null ? (int) $this->image_id : null,
+            'image_url' => $imageUrl,
+            'image' => $imageUrl,
+            'is_active' => (bool) ($this->is_active ?? true),
         ];
     }
 }

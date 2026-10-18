@@ -6,9 +6,12 @@ use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\ProductImage;
+use App\Models\ProductVariant;
 use App\Services\ProductImportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -224,8 +227,11 @@ class AdminProductController extends Controller
             'images.*.display_order' => 'nullable|integer',
             'specifications' => 'nullable|array',
             'tags' => 'nullable|array',
+            'options' => 'nullable|array',
+            'options.*.name' => 'required_with:options|string|max:100',
+            'options.*.values' => 'required_with:options|array|min:1',
             'variants' => 'nullable|array',
-            'variants.*.name' => 'required_with:variants|string|max:100',
+            'variants.*.name' => 'nullable|string|max:100',
             'variants.*.size' => 'nullable|string|max:50',
             'variants.*.color_name' => 'nullable|string|max:100',
             'variants.*.color_hex' => 'nullable|string|max:50',
@@ -233,7 +239,14 @@ class AdminProductController extends Controller
             'variants.*.price_modifier' => 'nullable|numeric|min:0',
             'variants.*.cost_price' => 'nullable|numeric|min:0',
             'variants.*.barcode' => 'nullable|string|max:100',
+            'variants.*.attributes' => 'nullable|array',
+            'variants.*.price' => 'nullable|numeric|min:0',
+            'variants.*.image_id' => 'nullable|integer',
+            'variants.*.is_active' => 'nullable|boolean',
         ]);
+
+        $options = $validated['options'] ?? null;
+        $variantItems = $validated['variants'] ?? null;
 
         // Normalize images list
         $imageItems = [];
@@ -268,108 +281,137 @@ class AdminProductController extends Controller
             ], 422);
         }
 
-        $slug = Str::slug($validated['name']) . '-' . Str::random(4);
-        $sku = 'PRD-' . strtoupper(Str::random(6));
-
-        $hasVariants = !empty($validated['variants']) && is_array($validated['variants']);
-        if ($hasVariants) {
-            if ($errorResponse = $this->validateVariantCombinations($validated['variants'])) {
-                return $errorResponse;
-            }
+        // Validate options and variant combinations before persisting anything
+        if ($errorResponse = $this->validateDynamicOptionsAndVariants($options, $variantItems)) {
+            return $errorResponse;
         }
 
-        $product = Product::create([
-            'category_id' => $validated['category_id'],
-            'subcategory_id' => $validated['subcategory_id'] ?? null,
-            'brand_id' => $validated['brand_id'] ?? null,
-            'name' => $validated['name'],
-            'slug' => $slug,
-            'brand' => $validated['brand'] ?? 'AETHER Studio',
-            'sku' => $sku,
-            'price' => (float) $validated['price'],
-            'cost_price' => isset($validated['cost_price']) && $validated['cost_price'] !== null ? (float) $validated['cost_price'] : null,
-            'compare_at_price' => isset($validated['compare_at_price']) ? (float) $validated['compare_at_price'] : null,
-            'stock_quantity' => $hasVariants ? 0 : (int) $validated['stock_quantity'],
-            'short_description' => $validated['short_description'] ?? null,
-            'description' => $validated['description'],
-            'is_featured' => $validated['is_featured'] ?? false,
-            'is_new_arrival' => $validated['is_new_arrival'] ?? true,
-            'is_best_seller' => $validated['is_best_seller'] ?? false,
-            'is_active' => $validated['is_active'] ?? true,
-            'rating_average' => 0.00,
-            'review_count' => 0,
-            'meta_title' => $validated['meta_title'] ?? null,
-            'meta_description' => $validated['meta_description'] ?? null,
-            'specifications' => $validated['specifications'] ?? [],
-            'tags' => $validated['tags'] ?? [],
-        ]);
+        DB::beginTransaction();
+        try {
+            $slug = Str::slug($validated['name']) . '-' . Str::random(4);
+            $sku = 'PRD-' . strtoupper(Str::random(6));
 
-        $hasPrimary = false;
-        foreach ($imageItems as $idx => $img) {
-            $isPrimary = !empty($img['is_primary']);
-            if ($isPrimary) {
-                if ($hasPrimary) {
-                    $isPrimary = false;
-                } else {
-                    $hasPrimary = true;
+            $hasVariants = !empty($variantItems) && is_array($variantItems);
+
+            $product = Product::create([
+                'category_id' => $validated['category_id'],
+                'subcategory_id' => $validated['subcategory_id'] ?? null,
+                'brand_id' => $validated['brand_id'] ?? null,
+                'name' => $validated['name'],
+                'slug' => $slug,
+                'brand' => $validated['brand'] ?? 'AETHER Studio',
+                'sku' => $sku,
+                'price' => (float) $validated['price'],
+                'cost_price' => isset($validated['cost_price']) && $validated['cost_price'] !== null ? (float) $validated['cost_price'] : null,
+                'compare_at_price' => isset($validated['compare_at_price']) ? (float) $validated['compare_at_price'] : null,
+                'stock_quantity' => $hasVariants ? 0 : (int) $validated['stock_quantity'],
+                'short_description' => $validated['short_description'] ?? null,
+                'description' => $validated['description'],
+                'is_featured' => $validated['is_featured'] ?? false,
+                'is_new_arrival' => $validated['is_new_arrival'] ?? true,
+                'is_best_seller' => $validated['is_best_seller'] ?? false,
+                'is_active' => $validated['is_active'] ?? true,
+                'rating_average' => 0.00,
+                'review_count' => 0,
+                'meta_title' => $validated['meta_title'] ?? null,
+                'meta_description' => $validated['meta_description'] ?? null,
+                'specifications' => $validated['specifications'] ?? [],
+                'tags' => $validated['tags'] ?? [],
+                'options' => $options,
+            ]);
+
+            $hasPrimary = false;
+            foreach ($imageItems as $idx => $img) {
+                $isPrimary = !empty($img['is_primary']);
+                if ($isPrimary) {
+                    if ($hasPrimary) {
+                        $isPrimary = false;
+                    } else {
+                        $hasPrimary = true;
+                    }
+                }
+                $imageItems[$idx]['_calculated_primary'] = $isPrimary;
+            }
+
+            if (!$hasPrimary && count($imageItems) > 0) {
+                $imageItems[0]['_calculated_primary'] = true;
+            }
+
+            $createdImageIds = [];
+            foreach ($imageItems as $idx => $img) {
+                $createdImg = $product->images()->create([
+                    'image_url' => $img['image_url'],
+                    'alt_text' => !empty($img['alt_text']) ? $img['alt_text'] : null,
+                    'color_name' => !empty($img['color_name']) ? trim((string)$img['color_name']) : null,
+                    'is_primary' => $imageItems[$idx]['_calculated_primary'],
+                    'display_order' => $img['display_order'] ?? $idx,
+                ]);
+                $createdImageIds[] = $createdImg->id;
+            }
+
+            // Save Variants
+            if ($hasVariants) {
+                // Check if any variant references an image_id not belonging to this product
+                foreach ($variantItems as $v) {
+                    if (!empty($v['image_id'])) {
+                        $imgId = (int)$v['image_id'];
+                        if (!in_array($imgId, $createdImageIds, true)) {
+                            DB::rollBack();
+                            return response()->json([
+                                'message' => "Image ID {$imgId} does not belong to this product.",
+                                'errors' => ['variants' => ["Image ID {$imgId} does not belong to this product."]],
+                            ], 422);
+                        }
+                    }
+                }
+
+                $createdVariantsCount = 0;
+                foreach ($variantItems as $v) {
+                    if (empty($v['name']) && empty($v['color_name']) && empty($v['size']) && empty($v['attributes'])) continue;
+                    $vStock = (int)($v['stock_quantity'] ?? 0);
+                    $createdVariantsCount++;
+                    $vName = $v['name'] ?? (!empty($v['attributes']) ? implode(' / ', array_values($v['attributes'])) : ($v['color_name'] ? ($v['color_name'] . (!empty($v['size']) ? ' / ' . $v['size'] : '')) : ($v['size'] ?? 'Standard Option')));
+                    $product->variants()->create([
+                        'name' => $vName,
+                        'size' => $v['size'] ?? null,
+                        'color_name' => $v['color_name'] ?? null,
+                        'color_hex' => $v['color_hex'] ?? null,
+                        'stock_quantity' => $vStock,
+                        'price_modifier' => isset($v['price_modifier']) ? (float)$v['price_modifier'] : 0.00,
+                        'price' => isset($v['price']) && $v['price'] !== null && $v['price'] !== '' ? (float)$v['price'] : null,
+                        'cost_price' => isset($v['cost_price']) && $v['cost_price'] !== null && $v['cost_price'] !== '' ? (float)$v['cost_price'] : null,
+                        'barcode' => !empty($v['barcode']) ? trim($v['barcode']) : null,
+                        'attributes' => $v['attributes'] ?? null,
+                        'image_id' => !empty($v['image_id']) ? (int)$v['image_id'] : null,
+                        'is_active' => isset($v['is_active']) ? (bool)$v['is_active'] : true,
+                        'sku' => $product->sku . '-' . strtoupper(Str::random(4)),
+                    ]);
+                }
+                if ($createdVariantsCount > 0) {
+                    $product->syncStockFromVariants();
                 }
             }
-            $imageItems[$idx]['_calculated_primary'] = $isPrimary;
+
+            AuditLog::log(
+                $request->user(),
+                'product.created',
+                'Product',
+                $product->id,
+                "Created hardware product '{$product->name}' (SKU: {$product->sku}) with " . count($imageItems) . " image(s) and " . ($hasVariants ? count($variantItems) : 0) . " variant(s)",
+                null,
+                $product->toArray()
+            );
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'Hardware product created successfully',
+                'product' => $product->load(['category', 'primaryImage', 'images', 'variants']),
+            ], 201);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            throw $e;
         }
-
-        if (!$hasPrimary && count($imageItems) > 0) {
-            $imageItems[0]['_calculated_primary'] = true;
-        }
-
-        foreach ($imageItems as $idx => $img) {
-            $product->images()->create([
-                'image_url' => $img['image_url'],
-                'alt_text' => !empty($img['alt_text']) ? $img['alt_text'] : null,
-                'color_name' => !empty($img['color_name']) ? trim((string)$img['color_name']) : null,
-                'is_primary' => $imageItems[$idx]['_calculated_primary'],
-                'display_order' => $img['display_order'] ?? $idx,
-            ]);
-        }
-
-        // Save Color & Inventory Variants
-        $variantItems = $validated['variants'] ?? [];
-        if (!empty($variantItems) && is_array($variantItems)) {
-            $createdVariantsCount = 0;
-            foreach ($variantItems as $v) {
-                if (empty($v['name']) && empty($v['color_name']) && empty($v['size'])) continue;
-                $vStock = (int)($v['stock_quantity'] ?? 0);
-                $createdVariantsCount++;
-                $product->variants()->create([
-                    'name' => $v['name'] ?? ($v['color_name'] ? ($v['color_name'] . (!empty($v['size']) ? ' / ' . $v['size'] : '')) : ($v['size'] ?? 'Standard Option')),
-                    'size' => $v['size'] ?? null,
-                    'color_name' => $v['color_name'] ?? null,
-                    'color_hex' => $v['color_hex'] ?? null,
-                    'stock_quantity' => $vStock,
-                    'price_modifier' => isset($v['price_modifier']) ? (float)$v['price_modifier'] : 0.00,
-                    'cost_price' => isset($v['cost_price']) && $v['cost_price'] !== null && $v['cost_price'] !== '' ? (float)$v['cost_price'] : null,
-                    'barcode' => !empty($v['barcode']) ? trim($v['barcode']) : null,
-                    'sku' => $product->sku . '-' . strtoupper(Str::random(4)),
-                ]);
-            }
-            if ($createdVariantsCount > 0) {
-                $product->syncStockFromVariants();
-            }
-        }
-
-        AuditLog::log(
-            $request->user(),
-            'product.created',
-            'Product',
-            $product->id,
-            "Created hardware product '{$product->name}' (SKU: {$product->sku}) with " . count($imageItems) . " image(s) and " . count($variantItems) . " color variant(s)",
-            null,
-            $product->toArray()
-        );
-
-        return response()->json([
-            'message' => 'Hardware product created successfully',
-            'product' => $product->load(['category', 'primaryImage', 'images', 'variants']),
-        ], 201);
     }
 
     public function update(Request $request, int $id): JsonResponse
@@ -407,9 +449,12 @@ class AdminProductController extends Controller
             'images.*.display_order' => 'nullable|integer',
             'specifications' => 'nullable|array',
             'tags' => 'nullable|array',
+            'options' => 'nullable|array',
+            'options.*.name' => 'required_with:options|string|max:100',
+            'options.*.values' => 'required_with:options|array|min:1',
             'variants' => 'nullable|array',
             'variants.*.id' => 'nullable|integer',
-            'variants.*.name' => 'required_with:variants|string|max:100',
+            'variants.*.name' => 'nullable|string|max:100',
             'variants.*.size' => 'nullable|string|max:50',
             'variants.*.color_name' => 'nullable|string|max:100',
             'variants.*.color_hex' => 'nullable|string|max:50',
@@ -417,242 +462,343 @@ class AdminProductController extends Controller
             'variants.*.price_modifier' => 'nullable|numeric|min:0',
             'variants.*.cost_price' => 'nullable|numeric|min:0',
             'variants.*.barcode' => 'nullable|string|max:100',
+            'variants.*.attributes' => 'nullable|array',
+            'variants.*.price' => 'nullable|numeric|min:0',
+            'variants.*.image_id' => 'nullable|integer',
+            'variants.*.is_active' => 'nullable|boolean',
         ]);
 
-        // Validate submitted variants for duplicate combinations before making any changes
-        if ($request->has('variants')) {
-            $variantItems = $request->input('variants');
-            if (is_array($variantItems)) {
-                if ($errorResponse = $this->validateVariantCombinations($variantItems)) {
-                    return $errorResponse;
+        $hasOptionsInRequest = $request->has('options');
+        $effectiveOptions = $hasOptionsInRequest ? $request->input('options') : $product->options;
+
+        $hasVariantsInRequest = $request->has('variants');
+        $variantItems = $hasVariantsInRequest ? $request->input('variants') : null;
+
+        // Pre-validate options structure and variant combinations before mutating DB
+        if ($errorResponse = $this->validateDynamicOptionsAndVariants($effectiveOptions, $variantItems, $product)) {
+            return $errorResponse;
+        }
+
+        DB::beginTransaction();
+        try {
+            // If product has active variants and variants are omitted from this payload, protect parent stock
+            if ($product->variants()->where('is_active', true)->exists() && !$hasVariantsInRequest) {
+                unset($validated['stock_quantity']);
+            }
+
+            if ($hasOptionsInRequest) {
+                $product->options = $validated['options'] ?? null;
+            }
+
+            $product->fill($validated);
+            $wasDirty = $product->isDirty();
+            $product->save();
+
+            // Handle image updates if images or image_url were passed
+            $availableImageIds = $product->images()->pluck('id')->map(fn($id) => (int)$id)->all();
+
+            if ($request->has('images') || $request->has('image_url')) {
+                $imageItems = [];
+                if ($request->has('images') && is_array($request->input('images'))) {
+                    $imageItems = array_values(array_filter($request->input('images'), function ($img) {
+                        return !empty($img['image_url']);
+                    }));
+                } elseif ($request->filled('image_url')) {
+                    $imageItems = [
+                        [
+                            'image_url' => $request->input('image_url'),
+                            'is_primary' => true,
+                            'alt_text' => $product->name,
+                            'display_order' => 0,
+                        ]
+                    ];
                 }
-            }
-        }
 
-        // If product has variants and variants are not part of this payload, do not allow parent stock overwrite
-        if ($product->variants()->exists() && !$request->has('variants')) {
-            unset($validated['stock_quantity']);
-        }
+                // Mandatory check: At least 1 image on modification
+                if (empty($imageItems)) {
+                    DB::rollBack();
+                    return response()->json([
+                        'message' => 'Validation error: At least 1 product image is mandatory. Please provide an image URL or upload an image from your device.',
+                        'errors' => ['images' => ['At least 1 product image is mandatory.']]
+                    ], 422);
+                }
 
-        $product->fill($validated);
-        $wasDirty = $product->isDirty();
-        $product->save();
+                // Limit check: Maximum 5 images
+                if (count($imageItems) > 5) {
+                    DB::rollBack();
+                    return response()->json([
+                        'message' => 'Validation error: A product cannot have more than 5 images.',
+                        'errors' => ['images' => ['Maximum limit is 5 images per product.']]
+                    ], 422);
+                }
 
-        // Handle image updates if images or image_url were passed
-        if ($request->has('images') || $request->has('image_url')) {
-            $imageItems = [];
-            if ($request->has('images') && is_array($request->input('images'))) {
-                $imageItems = array_values(array_filter($request->input('images'), function ($img) {
-                    return !empty($img['image_url']);
-                }));
-            } elseif ($request->filled('image_url')) {
-                $imageItems = [
-                    [
-                        'image_url' => $request->input('image_url'),
-                        'is_primary' => true,
-                        'alt_text' => $product->name,
-                        'display_order' => 0,
-                    ]
-                ];
-            }
+                // Reconcile existing images vs submitted images
+                $existingImages = $product->images()->get()->keyBy('id');
+                $keptImageIds = [];
 
-            // Mandatory check: At least 1 image on modification
-            if (empty($imageItems)) {
-                return response()->json([
-                    'message' => 'Validation error: At least 1 product image is mandatory. Please provide an image URL or upload an image from your device.',
-                    'errors' => ['images' => ['At least 1 product image is mandatory.']]
-                ], 422);
-            }
+                $hasPrimary = false;
+                foreach ($imageItems as $idx => $img) {
+                    $isPrimary = !empty($img['is_primary']);
+                    if ($isPrimary) {
+                        if ($hasPrimary) {
+                            $isPrimary = false;
+                        } else {
+                            $hasPrimary = true;
+                        }
+                    }
+                    $imageItems[$idx]['_calculated_primary'] = $isPrimary;
+                }
 
-            // Limit check: Maximum 5 images
-            if (count($imageItems) > 5) {
-                return response()->json([
-                    'message' => 'Validation error: A product cannot have more than 5 images.',
-                    'errors' => ['images' => ['Maximum limit is 5 images per product.']]
-                ], 422);
-            }
+                if (!$hasPrimary && count($imageItems) > 0) {
+                    $imageItems[0]['_calculated_primary'] = true;
+                }
 
-            // Reconcile existing images vs submitted images
-            $existingImages = $product->images()->get()->keyBy('id');
-            $keptImageIds = [];
+                foreach ($imageItems as $idx => $img) {
+                    $imgId = !empty($img['id']) ? (int)$img['id'] : null;
+                    $colorName = !empty($img['color_name']) ? trim((string)$img['color_name']) : null;
+                    $displayOrder = $img['display_order'] ?? $idx;
+                    $altText = !empty($img['alt_text']) ? $img['alt_text'] : null;
+                    $imageUrl = $img['image_url'];
+                    $isPrimary = $imageItems[$idx]['_calculated_primary'];
 
-            $hasPrimary = false;
-            foreach ($imageItems as $idx => $img) {
-                $isPrimary = !empty($img['is_primary']);
-                if ($isPrimary) {
-                    if ($hasPrimary) {
-                        $isPrimary = false;
+                    $matchedExisting = null;
+                    if ($imgId && $existingImages->has($imgId)) {
+                        $matchedExisting = $existingImages->get($imgId);
                     } else {
-                        $hasPrimary = true;
+                        // Match unkept existing record with the exact same image_url
+                        $matchedExisting = $existingImages->first(function ($ex) use ($imageUrl, $keptImageIds) {
+                            return $ex->image_url === $imageUrl && !in_array($ex->id, $keptImageIds, true);
+                        });
+                    }
+
+                    if ($matchedExisting) {
+                        // If image URL changed on same ID, delete the replaced physical file
+                        if ($matchedExisting->image_url !== $imageUrl) {
+                            $matchedExisting->deletePhysicalFile();
+                        }
+
+                        $matchedExisting->update([
+                            'image_url' => $imageUrl,
+                            'alt_text' => $altText,
+                            'color_name' => $colorName,
+                            'is_primary' => $isPrimary,
+                            'display_order' => $displayOrder,
+                        ]);
+                        $keptImageIds[] = $matchedExisting->id;
+                    } else {
+                        $newImg = $product->images()->create([
+                            'image_url' => $imageUrl,
+                            'alt_text' => $altText,
+                            'color_name' => $colorName,
+                            'is_primary' => $isPrimary,
+                            'display_order' => $displayOrder,
+                        ]);
+                        $keptImageIds[] = $newImg->id;
                     }
                 }
-                $imageItems[$idx]['_calculated_primary'] = $isPrimary;
+
+                // Remove any existing images that were not kept, triggering physical file deletion via deleting hook
+                foreach ($existingImages as $exId => $exImg) {
+                    if (!in_array($exId, $keptImageIds, true)) {
+                        $exImg->delete();
+                    }
+                }
+                $availableImageIds = $keptImageIds;
+                $wasDirty = true;
             }
 
-            if (!$hasPrimary && count($imageItems) > 0) {
-                $imageItems[0]['_calculated_primary'] = true;
-            }
-
-            foreach ($imageItems as $idx => $img) {
-                $imgId = !empty($img['id']) ? (int)$img['id'] : null;
-                $colorName = !empty($img['color_name']) ? trim((string)$img['color_name']) : null;
-                $displayOrder = $img['display_order'] ?? $idx;
-                $altText = !empty($img['alt_text']) ? $img['alt_text'] : null;
-                $imageUrl = $img['image_url'];
-                $isPrimary = $imageItems[$idx]['_calculated_primary'];
-
-                $matchedExisting = null;
-                if ($imgId && $existingImages->has($imgId)) {
-                    $matchedExisting = $existingImages->get($imgId);
+            // Handle Variants updates with deterministic reconciliation & safe deactivation
+            if ($hasVariantsInRequest) {
+                if (!is_array($variantItems) || count($variantItems) === 0) {
+                    // Mode Transition: Converting to Simple Product!
+                    // Safely deactivate all existing variants without physical deletion
+                    $product->variants()->update(['is_active' => false]);
+                    if (!$hasOptionsInRequest) {
+                        $product->options = null;
+                    }
+                    if (isset($validated['stock_quantity'])) {
+                        $product->stock_quantity = (int)$validated['stock_quantity'];
+                    }
+                    $product->save();
+                    $wasDirty = true;
                 } else {
-                    // Match unkept existing record with the exact same image_url
-                    $matchedExisting = $existingImages->first(function ($ex) use ($imageUrl, $keptImageIds) {
-                        return $ex->image_url === $imageUrl && !in_array($ex->id, $keptImageIds, true);
-                    });
-                }
+                    $existingVariants = $product->variants()->get()->keyBy('id');
 
-                if ($matchedExisting) {
-                    // If image URL changed on same ID, delete the replaced physical file
-                    if ($matchedExisting->image_url !== $imageUrl) {
-                        $matchedExisting->deletePhysicalFile();
+                    // 1. Validate submitted variant IDs
+                    $submittedIds = [];
+                    foreach ($variantItems as $v) {
+                        if (!empty($v['id'])) {
+                            $sId = (int)$v['id'];
+                            if (in_array($sId, $submittedIds, true)) {
+                                DB::rollBack();
+                                return response()->json([
+                                    'message' => "Duplicate variant ID {$sId} submitted.",
+                                    'errors' => ['variants' => ["Duplicate variant ID {$sId} submitted."]],
+                                ], 422);
+                            }
+                            $submittedIds[] = $sId;
+
+                            if (!$existingVariants->has($sId)) {
+                                DB::rollBack();
+                                return response()->json([
+                                    'message' => "Variant ID {$sId} does not belong to this product.",
+                                    'errors' => ['variants' => ["Variant ID {$sId} does not belong to this product."]],
+                                ], 422);
+                            }
+                        }
                     }
 
-                    $matchedExisting->update([
-                        'image_url' => $imageUrl,
-                        'alt_text' => $altText,
-                        'color_name' => $colorName,
-                        'is_primary' => $isPrimary,
-                        'display_order' => $displayOrder,
-                    ]);
-                    $keptImageIds[] = $matchedExisting->id;
-                } else {
-                    $newImg = $product->images()->create([
-                        'image_url' => $imageUrl,
-                        'alt_text' => $altText,
-                        'color_name' => $colorName,
-                        'is_primary' => $isPrimary,
-                        'display_order' => $displayOrder,
-                    ]);
-                    $keptImageIds[] = $newImg->id;
-                }
-            }
-
-            // Remove any existing images that were not kept, triggering physical file deletion via deleting hook
-            foreach ($existingImages as $exId => $exImg) {
-                if (!in_array($exId, $keptImageIds, true)) {
-                    $exImg->delete();
-                }
-            }
-            $wasDirty = true;
-        }
-
-        // Handle Color & Inventory Variants updates with ID reconciliation
-        if ($request->has('variants')) {
-            $variantItems = $request->input('variants');
-            if (!is_array($variantItems)) {
-                $variantItems = [];
-            }
-
-            // 1. Gather all existing variants for this product
-            $existingVariants = $product->variants()->get()->keyBy('id');
-
-            // 2. Validate submitted variant IDs for duplicates and cross-product violations
-            $submittedIds = [];
-            foreach ($variantItems as $v) {
-                if (!empty($v['id'])) {
-                    $sId = (int)$v['id'];
-                    if (in_array($sId, $submittedIds, true)) {
-                        return response()->json([
-                            'message' => "Duplicate variant ID {$sId} submitted.",
-                            'errors' => ['variants' => ["Duplicate variant ID {$sId} submitted."]],
-                        ], 422);
+                    // 2. Validate image_id ownership
+                    foreach ($variantItems as $v) {
+                        if (!empty($v['image_id'])) {
+                            $imgId = (int)$v['image_id'];
+                            if (!in_array($imgId, $availableImageIds, true)) {
+                                DB::rollBack();
+                                return response()->json([
+                                    'message' => "Image ID {$imgId} does not belong to this product.",
+                                    'errors' => ['variants' => ["Image ID {$imgId} does not belong to this product."]],
+                                ], 422);
+                            }
+                        }
                     }
-                    $submittedIds[] = $sId;
 
-                    if (!$existingVariants->has($sId)) {
-                        return response()->json([
-                            'message' => "Variant ID {$sId} does not belong to this product.",
-                            'errors' => ['variants' => ["Variant ID {$sId} does not belong to this product."]],
-                        ], 422);
+                    $isDynamic = !empty($effectiveOptions) && is_array($effectiveOptions) && count($effectiveOptions) > 0;
+                    $keptIds = [];
+
+                    // 3a. Update variants with explicit IDs in-place (PRESERVE ID & SKU)
+                    foreach ($variantItems as $v) {
+                        if (!empty($v['id'])) {
+                            $sId = (int)$v['id'];
+                            $existing = $existingVariants->get($sId);
+                            $vStock = (int)($v['stock_quantity'] ?? 0);
+                            $vName = $v['name'] ?? (!empty($v['attributes']) ? implode(' / ', array_values($v['attributes'])) : ($v['color_name'] ? ($v['color_name'] . (!empty($v['size']) ? ' / ' . $v['size'] : '')) : ($v['size'] ?? $existing->name)));
+
+                            $existing->update([
+                                'name' => $vName,
+                                'size' => $v['size'] ?? null,
+                                'color_name' => $v['color_name'] ?? null,
+                                'color_hex' => $v['color_hex'] ?? null,
+                                'stock_quantity' => $vStock,
+                                'price_modifier' => isset($v['price_modifier']) ? (float)$v['price_modifier'] : 0.00,
+                                'price' => isset($v['price']) && $v['price'] !== null && $v['price'] !== '' ? (float)$v['price'] : null,
+                                'cost_price' => isset($v['cost_price']) && $v['cost_price'] !== null && $v['cost_price'] !== '' ? (float)$v['cost_price'] : null,
+                                'barcode' => !empty($v['barcode']) ? trim($v['barcode']) : null,
+                                'attributes' => $v['attributes'] ?? null,
+                                'image_id' => !empty($v['image_id']) ? (int)$v['image_id'] : null,
+                                'is_active' => isset($v['is_active']) ? (bool)$v['is_active'] : true,
+                                'sku' => $existing->sku ?: ($product->sku . '-' . strtoupper(Str::random(4))),
+                            ]);
+                            $keptIds[] = $existing->id;
+                        }
                     }
+
+                    // 3b. Process variants WITHOUT ID: match deterministically or create new
+                    $unmatchedExisting = $existingVariants->except($keptIds);
+
+                    foreach ($variantItems as $v) {
+                        if (empty($v['id'])) {
+                            if (empty($v['name']) && empty($v['color_name']) && empty($v['size']) && empty($v['attributes'])) {
+                                continue;
+                            }
+
+                            $incomingKey = $this->getCanonicalVariantKey($v, $isDynamic);
+                            $matchedExisting = null;
+
+                            if ($incomingKey !== '') {
+                                foreach ($unmatchedExisting as $candidate) {
+                                    $candidateKey = $this->getCanonicalVariantKey($candidate, $isDynamic);
+                                    if ($candidateKey !== '' && $candidateKey === $incomingKey) {
+                                        $matchedExisting = $candidate;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            $vStock = (int)($v['stock_quantity'] ?? 0);
+                            $vName = $v['name'] ?? (!empty($v['attributes']) ? implode(' / ', array_values($v['attributes'])) : ($v['color_name'] ? ($v['color_name'] . (!empty($v['size']) ? ' / ' . $v['size'] : '')) : ($v['size'] ?? 'Standard Option')));
+                            $price = isset($v['price']) && $v['price'] !== null && $v['price'] !== '' ? (float)$v['price'] : null;
+                            $priceModifier = isset($v['price_modifier']) ? (float)$v['price_modifier'] : 0.00;
+                            $costPrice = isset($v['cost_price']) && $v['cost_price'] !== null && $v['cost_price'] !== '' ? (float)$v['cost_price'] : null;
+                            $barcode = !empty($v['barcode']) ? trim($v['barcode']) : null;
+                            $imageId = !empty($v['image_id']) ? (int)$v['image_id'] : null;
+                            $isActive = isset($v['is_active']) ? (bool)$v['is_active'] : true;
+
+                            if ($matchedExisting) {
+                                // Deterministic reactivation of matching combination (PRESERVE ID & SKU)
+                                $matchedExisting->update([
+                                    'name' => $vName,
+                                    'size' => $v['size'] ?? null,
+                                    'color_name' => $v['color_name'] ?? null,
+                                    'color_hex' => $v['color_hex'] ?? null,
+                                    'stock_quantity' => $vStock,
+                                    'price_modifier' => $priceModifier,
+                                    'price' => $price,
+                                    'cost_price' => $costPrice,
+                                    'barcode' => $barcode,
+                                    'attributes' => $v['attributes'] ?? null,
+                                    'image_id' => $imageId,
+                                    'is_active' => $isActive,
+                                    'sku' => $matchedExisting->sku ?: ($product->sku . '-' . strtoupper(Str::random(4))),
+                                ]);
+                                $keptIds[] = $matchedExisting->id;
+                                $unmatchedExisting->forget($matchedExisting->id);
+                            } else {
+                                // Create new variant row
+                                $newVariant = $product->variants()->create([
+                                    'name' => $vName,
+                                    'size' => $v['size'] ?? null,
+                                    'color_name' => $v['color_name'] ?? null,
+                                    'color_hex' => $v['color_hex'] ?? null,
+                                    'stock_quantity' => $vStock,
+                                    'price_modifier' => $priceModifier,
+                                    'price' => $price,
+                                    'cost_price' => $costPrice,
+                                    'barcode' => $barcode,
+                                    'attributes' => $v['attributes'] ?? null,
+                                    'image_id' => $imageId,
+                                    'is_active' => $isActive,
+                                    'sku' => $product->sku . '-' . strtoupper(Str::random(4)),
+                                ]);
+                                $keptIds[] = $newVariant->id;
+                            }
+                        }
+                    }
+
+                    // 4. Safely deactivate omitted variants without physical deletion!
+                    $variantsToDeactivate = $existingVariants->except($keptIds);
+                    foreach ($variantsToDeactivate as $toDeactivate) {
+                        $toDeactivate->update(['is_active' => false]);
+                    }
+
+                    // 5. Sync stock from active variants
+                    $product->syncStockFromVariants();
+
+                    $wasDirty = true;
                 }
             }
 
-            // 3. Reconcile variants: update existing in-place, create new
-            $keptIds = [];
-            foreach ($variantItems as $v) {
-                if (empty($v['name']) && empty($v['color_name']) && empty($v['size'])) {
-                    continue;
-                }
-
-                $vStock = (int)($v['stock_quantity'] ?? 0);
-                $name = $v['name'] ?? ($v['color_name'] ? ($v['color_name'] . (!empty($v['size']) ? ' / ' . $v['size'] : '')) : ($v['size'] ?? 'Standard Option'));
-                $priceModifier = isset($v['price_modifier']) ? (float)$v['price_modifier'] : 0.00;
-                $costPrice = isset($v['cost_price']) && $v['cost_price'] !== null && $v['cost_price'] !== '' ? (float)$v['cost_price'] : null;
-                $barcode = !empty($v['barcode']) ? trim($v['barcode']) : null;
-
-                if (!empty($v['id']) && $existingVariants->has((int)$v['id'])) {
-                    // Update existing variant in place — PRESERVE ID!
-                    $existingVariant = $existingVariants->get((int)$v['id']);
-                    $existingVariant->update([
-                        'name' => $name,
-                        'size' => $v['size'] ?? null,
-                        'color_name' => $v['color_name'] ?? null,
-                        'color_hex' => $v['color_hex'] ?? null,
-                        'stock_quantity' => $vStock,
-                        'price_modifier' => $priceModifier,
-                        'cost_price' => $costPrice,
-                        'barcode' => $barcode,
-                        'sku' => $existingVariant->sku ?: ($product->sku . '-' . strtoupper(Str::random(4))),
-                    ]);
-                    $keptIds[] = $existingVariant->id;
-                } else {
-                    // Create new variant
-                    $newVariant = $product->variants()->create([
-                        'name' => $name,
-                        'size' => $v['size'] ?? null,
-                        'color_name' => $v['color_name'] ?? null,
-                        'color_hex' => $v['color_hex'] ?? null,
-                        'stock_quantity' => $vStock,
-                        'price_modifier' => $priceModifier,
-                        'cost_price' => $costPrice,
-                        'barcode' => $barcode,
-                        'sku' => $product->sku . '-' . strtoupper(Str::random(4)),
-                    ]);
-                    $keptIds[] = $newVariant->id;
-                }
+            if ($wasDirty) {
+                AuditLog::log(
+                    $request->user(),
+                    'product.updated',
+                    'Product',
+                    $product->id,
+                    "Updated hardware product '{$product->name}' (SKU: {$product->sku})",
+                    $oldValues,
+                    $product->toArray()
+                );
             }
 
-            // 4. Delete only existing variants that were removed by the admin
-            $variantsToDelete = $existingVariants->except($keptIds);
-            foreach ($variantsToDelete as $toDelete) {
-                $toDelete->delete();
-            }
+            DB::commit();
 
-            // 5. Sync product stock from remaining variants
-            if (count($keptIds) > 0) {
-                $product->syncStockFromVariants();
-            }
-
-            $wasDirty = true;
+            return response()->json([
+                'message' => 'Product updated successfully',
+                'product' => $product->load(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants']),
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            throw $e;
         }
-
-        if ($wasDirty) {
-            AuditLog::log(
-                $request->user(),
-                'product.updated',
-                'Product',
-                $product->id,
-                "Updated hardware product '{$product->name}' (SKU: {$product->sku})",
-                $oldValues,
-                $product->toArray()
-            );
-        }
-
-        return response()->json([
-            'message' => 'Product updated successfully',
-            'product' => $product->load(['category', 'subcategory', 'brandRelation', 'primaryImage', 'images', 'variants']),
-        ]);
     }
 
     public function destroy(Request $request, int $id): JsonResponse
@@ -1004,31 +1150,247 @@ class AdminProductController extends Controller
      * Normalized by trimming whitespace and converting to lowercase.
      * Returns null if valid, or a JsonResponse with HTTP 422 if duplicates are found.
      */
-    private function validateVariantCombinations(array $variants): ?JsonResponse
+    public function validateVariantCombinations(array $variants): ?JsonResponse
     {
-        $seenCombinations = [];
-        foreach ($variants as $v) {
-            $colorName = isset($v['color_name']) && $v['color_name'] !== null ? trim((string)$v['color_name']) : '';
-            $size = isset($v['size']) && $v['size'] !== null ? trim((string)$v['size']) : '';
+        return $this->validateDynamicOptionsAndVariants(null, $variants);
+    }
 
-            // Only validate combinations where at least one of color_name or size is present.
-            // Generic name-only variants (where both are empty) are separate valid modes.
-            if ($colorName !== '' || $size !== '') {
-                $key = strtolower($colorName) . '|' . strtolower($size);
-                if (isset($seenCombinations[$key])) {
-                    $display = $colorName !== '' && $size !== ''
-                        ? "{$colorName} / {$size}"
-                        : ($colorName !== '' ? $colorName : $size);
+    /**
+     * Compute a deterministic canonical combination key for variant matching.
+     */
+    protected function getCanonicalVariantKey(array|ProductVariant $variant, bool $isDynamic): string
+    {
+        if ($isDynamic) {
+            $attrs = is_array($variant) ? ($variant['attributes'] ?? []) : ($variant->attributes ?? []);
+            if (!is_array($attrs) || empty($attrs)) {
+                return '';
+            }
+            $pairs = [];
+            foreach ($attrs as $k => $v) {
+                $kTrim = strtolower(trim((string)$k));
+                $vTrim = strtolower(trim((string)$v));
+                if ($kTrim !== '') {
+                    $pairs[$kTrim] = $vTrim;
+                }
+            }
+            ksort($pairs);
+            $parts = [];
+            foreach ($pairs as $k => $v) {
+                $parts[] = "{$k}={$v}";
+            }
+            return implode('|', $parts);
+        }
+
+        $colorName = is_array($variant)
+            ? (isset($variant['color_name']) && $variant['color_name'] !== null ? trim((string)$variant['color_name']) : '')
+            : (isset($variant->color_name) && $variant->color_name !== null ? trim((string)$variant->color_name) : '');
+
+        $size = is_array($variant)
+            ? (isset($variant['size']) && $variant['size'] !== null ? trim((string)$variant['size']) : '')
+            : (isset($variant->size) && $variant->size !== null ? trim((string)$variant->size) : '');
+
+        if ($colorName !== '' || $size !== '') {
+            return strtolower($colorName) . '|' . strtolower($size);
+        }
+
+        $name = is_array($variant) ? ($variant['name'] ?? '') : ($variant->name ?? '');
+        return 'name:' . strtolower(trim((string)$name));
+    }
+
+    /**
+     * Validate dynamic options schema, variant attributes, and combination uniqueness.
+     */
+    protected function validateDynamicOptionsAndVariants(?array $options, ?array $variants, ?Product $product = null): ?JsonResponse
+    {
+        $declaredOptions = [];
+
+        // 1. Validate options structure if provided
+        if ($options !== null) {
+            if (!is_array($options)) {
+                return response()->json([
+                    'message' => 'Validation error: Options must be an array of option groups.',
+                    'errors' => ['options' => ['Options must be an array of option groups.']],
+                ], 422);
+            }
+
+            $seenOptionNames = [];
+            foreach ($options as $optGroup) {
+                if (!is_array($optGroup)) {
                     return response()->json([
-                        'message' => 'Duplicate variant combination submitted.',
-                        'errors' => [
-                            'variants' => ["Duplicate combination '{$display}' submitted."],
-                        ],
+                        'message' => 'Validation error: Each option group must be an object with name and values.',
+                        'errors' => ['options' => ['Each option group must be an object with name and values.']],
                     ], 422);
                 }
-                $seenCombinations[$key] = true;
+
+                $name = isset($optGroup['name']) && is_string($optGroup['name']) ? trim($optGroup['name']) : '';
+                if ($name === '') {
+                    return response()->json([
+                        'message' => 'Validation error: Each option group must have a non-empty name.',
+                        'errors' => ['options' => ['Each option group must have a non-empty name.']],
+                    ], 422);
+                }
+
+                $lowerName = strtolower($name);
+                if (isset($seenOptionNames[$lowerName])) {
+                    return response()->json([
+                        'message' => "Duplicate option group name '{$name}'. Option group names must be unique.",
+                        'errors' => ['options' => ["Duplicate option group name '{$name}'. Option group names must be unique."]],
+                    ], 422);
+                }
+                $seenOptionNames[$lowerName] = true;
+
+                if (!isset($optGroup['values']) || !is_array($optGroup['values']) || count($optGroup['values']) === 0) {
+                    return response()->json([
+                        'message' => "Option group '{$name}' must contain at least one value.",
+                        'errors' => ['options' => ["Option group '{$name}' must contain at least one value."]],
+                    ], 422);
+                }
+
+                $seenValues = [];
+                $groupValues = [];
+                foreach ($optGroup['values'] as $val) {
+                    if (!is_string($val) && !is_numeric($val)) {
+                        return response()->json([
+                            'message' => "Option values for '{$name}' must be non-empty strings.",
+                            'errors' => ['options' => ["Option values for '{$name}' must be non-empty strings."]],
+                        ], 422);
+                    }
+                    $valStr = trim((string)$val);
+                    if ($valStr === '') {
+                        return response()->json([
+                            'message' => "Option values for '{$name}' must be non-empty strings.",
+                            'errors' => ['options' => ["Option values for '{$name}' must be non-empty strings."]],
+                        ], 422);
+                    }
+                    $lowerVal = strtolower($valStr);
+                    if (isset($seenValues[$lowerVal])) {
+                        return response()->json([
+                            'message' => "Duplicate value '{$valStr}' in option group '{$name}'. Values within an option group must be unique.",
+                            'errors' => ['options' => ["Duplicate value '{$valStr}' in option group '{$name}'. Values within an option group must be unique."]],
+                        ], 422);
+                    }
+                    $seenValues[$lowerVal] = true;
+                    $groupValues[] = $valStr;
+                }
+
+                $declaredOptions[$lowerName] = [
+                    'name' => $name,
+                    'values' => $groupValues,
+                    'values_lower' => $seenValues,
+                ];
             }
         }
+
+        // 2. Validate variants if provided
+        if ($variants !== null && is_array($variants) && count($variants) > 0) {
+            $isDynamic = !empty($declaredOptions);
+            $seenCombinations = [];
+
+            foreach ($variants as $idx => $v) {
+                if (!is_array($v)) {
+                    return response()->json([
+                        'message' => 'Validation error: Each variant must be an object.',
+                        'errors' => ['variants' => ['Each variant must be an object.']],
+                    ], 422);
+                }
+
+                if ($isDynamic) {
+                    $vName = $v['name'] ?? 'Variant #' . ($idx + 1);
+                    $attributes = $v['attributes'] ?? null;
+
+                    if (!is_array($attributes)) {
+                        return response()->json([
+                            'message' => "Variant '{$vName}' is missing attributes for dynamic options.",
+                            'errors' => ['variants' => ["Variant '{$vName}' is missing attributes for dynamic options."]],
+                        ], 422);
+                    }
+
+                    // Map attributes by lowercased trimmed key
+                    $attrMap = [];
+                    foreach ($attributes as $attrKey => $attrVal) {
+                        $lowerKey = strtolower(trim((string)$attrKey));
+                        $attrMap[$lowerKey] = [
+                            'original_key' => $attrKey,
+                            'value' => $attrVal,
+                        ];
+                    }
+
+                    // Check that EVERY declared option group is present with a valid value
+                    foreach ($declaredOptions as $lowerOptName => $optMeta) {
+                        if (!isset($attrMap[$lowerOptName])) {
+                            return response()->json([
+                                'message' => "Missing attribute '{$optMeta['name']}' for variant '{$vName}'. Every declared option group must have a value.",
+                                'errors' => ['variants' => ["Missing attribute '{$optMeta['name']}' for variant '{$vName}'. Every declared option group must have a value."]],
+                            ], 422);
+                        }
+
+                        $rawVal = $attrMap[$lowerOptName]['value'];
+                        if (!is_string($rawVal) && !is_numeric($rawVal)) {
+                            return response()->json([
+                                'message' => "Attribute '{$optMeta['name']}' must be a non-empty string for variant '{$vName}'.",
+                                'errors' => ['variants' => ["Attribute '{$optMeta['name']}' must be a non-empty string for variant '{$vName}'."]],
+                            ], 422);
+                        }
+
+                        $valStr = trim((string)$rawVal);
+                        if ($valStr === '') {
+                            return response()->json([
+                                'message' => "Missing attribute '{$optMeta['name']}' for variant '{$vName}'. Every declared option group must have a value.",
+                                'errors' => ['variants' => ["Missing attribute '{$optMeta['name']}' for variant '{$vName}'. Every declared option group must have a value."]],
+                            ], 422);
+                        }
+
+                        if (!isset($optMeta['values_lower'][strtolower($valStr)])) {
+                            return response()->json([
+                                'message' => "Invalid value '{$valStr}' for option group '{$optMeta['name']}'. Allowed values: " . implode(', ', $optMeta['values']) . ".",
+                                'errors' => ['variants' => ["Invalid value '{$valStr}' for option group '{$optMeta['name']}'. Allowed values: " . implode(', ', $optMeta['values']) . "."]],
+                            ], 422);
+                        }
+                    }
+
+                    // Check for extra/undeclared attributes
+                    foreach ($attrMap as $lowerKey => $attrInfo) {
+                        if (!isset($declaredOptions[$lowerKey])) {
+                            return response()->json([
+                                'message' => "Unknown attribute '{$attrInfo['original_key']}' for variant '{$vName}'. Only declared option groups are allowed.",
+                                'errors' => ['variants' => ["Unknown attribute '{$attrInfo['original_key']}' for variant '{$vName}'. Only declared option groups are allowed."]],
+                            ], 422);
+                        }
+                    }
+
+                    // Check for duplicate attribute combinations in payload
+                    $canonicalKey = $this->getCanonicalVariantKey($v, true);
+                    if (isset($seenCombinations[$canonicalKey])) {
+                        return response()->json([
+                            'message' => 'Duplicate variant combination submitted.',
+                            'errors' => ['variants' => ["Duplicate combination '{$canonicalKey}' submitted."]],
+                        ], 422);
+                    }
+                    $seenCombinations[$canonicalKey] = true;
+                } else {
+                    // Legacy color + size duplicate checking
+                    $colorName = isset($v['color_name']) && $v['color_name'] !== null ? trim((string)$v['color_name']) : '';
+                    $size = isset($v['size']) && $v['size'] !== null ? trim((string)$v['size']) : '';
+
+                    if ($colorName !== '' || $size !== '') {
+                        $key = strtolower($colorName) . '|' . strtolower($size);
+                        if (isset($seenCombinations[$key])) {
+                            $display = $colorName !== '' && $size !== ''
+                                ? "{$colorName} / {$size}"
+                                : ($colorName !== '' ? $colorName : $size);
+                            return response()->json([
+                                'message' => 'Duplicate variant combination submitted.',
+                                'errors' => [
+                                    'variants' => ["Duplicate combination '{$display}' submitted."],
+                                ],
+                            ], 422);
+                        }
+                        $seenCombinations[$key] = true;
+                    }
+                }
+            }
+        }
+
         return null;
     }
 
@@ -1159,7 +1521,9 @@ class AdminProductController extends Controller
 
         $filename = 'products-export-' . now()->format('Y-m-d-H-i') . '.csv';
 
-        return response()->streamDownload(function () use ($query) {
+        $includeOptions = filter_var($request->input('include_options', $request->input('options', false)), FILTER_VALIDATE_BOOLEAN);
+
+        return response()->streamDownload(function () use ($query, $includeOptions) {
             $handle = fopen('php://output', 'w');
 
             // Write UTF-8 BOM for Excel / spreadsheet compatibility
@@ -1189,9 +1553,13 @@ class AdminProductController extends Controller
                 'Updated At',
             ];
 
+            if ($includeOptions) {
+                $headers[] = 'Options';
+            }
+
             fputcsv($handle, $headers);
 
-            $query->chunk(100, function ($products) use ($handle) {
+            $query->chunk(100, function ($products) use ($handle, $includeOptions) {
                 foreach ($products as $product) {
                     $primaryImg = $product->primaryImage
                         ?? $product->images->where('is_primary', true)->first()
@@ -1214,23 +1582,39 @@ class AdminProductController extends Controller
                         ? json_encode($additionalImages->toArray(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
                         : '';
 
-                    $variants = $product->variants->map(fn($v) => [
-                        'sku' => $v->sku,
-                        'name' => $v->name,
-                        'color_name' => $v->color_name,
-                        'color_hex' => $v->color_hex,
-                        'size' => $v->size,
-                        'price_modifier' => (float) ($v->price_modifier ?? 0),
-                        'cost_price' => $v->cost_price !== null ? (float) $v->cost_price : null,
-                        'stock_quantity' => (int) ($v->stock_quantity ?? 0),
-                        'barcode' => $v->barcode,
-                    ]);
+                    $variants = $product->variants->map(function ($v) {
+                        $item = [
+                            'sku' => $v->sku,
+                            'name' => $v->name,
+                            'color_name' => $v->color_name,
+                            'color_hex' => $v->color_hex,
+                            'size' => $v->size,
+                            'price_modifier' => (float) ($v->price_modifier ?? 0),
+                            'cost_price' => $v->cost_price !== null ? (float) $v->cost_price : null,
+                            'stock_quantity' => (int) ($v->stock_quantity ?? 0),
+                            'barcode' => $v->barcode,
+                            'price' => $v->price !== null ? (float) $v->price : null,
+                            'is_active' => (bool) $v->is_active,
+                            'attributes' => $v->variant_attributes ?: null,
+                        ];
+
+                        if ($v->id) {
+                            $item['id'] = $v->id;
+                        }
+
+                        if ($v->image_id && $v->image) {
+                            $item['image_id'] = $v->image_id;
+                            $item['image_url'] = $v->image->image_url;
+                        }
+
+                        return $item;
+                    });
 
                     $variantSummaryJson = $variants->isNotEmpty()
                         ? json_encode($variants->toArray(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
                         : '';
 
-                    fputcsv($handle, [
+                    $row = [
                         $product->id,
                         $this->sanitizeCsvField($product->sku),
                         $this->sanitizeCsvField($product->name),
@@ -1252,7 +1636,15 @@ class AdminProductController extends Controller
                         $variantSummaryJson,
                         $product->created_at ? $product->created_at->format('Y-m-d H:i:s') : '',
                         $product->updated_at ? $product->updated_at->format('Y-m-d H:i:s') : '',
-                    ]);
+                    ];
+
+                    if ($includeOptions) {
+                        $row[] = !empty($product->options)
+                            ? json_encode($product->options, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+                            : '';
+                    }
+
+                    fputcsv($handle, $row);
                 }
             });
 
@@ -1311,7 +1703,9 @@ class AdminProductController extends Controller
 
         try {
             $service = new ProductImportService();
-            $result = $service->validateUpload($file, $request->user());
+            $result = $service->validateUpload($file, $request->user(), [
+                'full_replacement' => $request->boolean('full_replacement'),
+            ]);
             return response()->json($result);
         } catch (\InvalidArgumentException $e) {
             return response()->json([
@@ -1340,7 +1734,11 @@ class AdminProductController extends Controller
 
         try {
             $service = new ProductImportService();
-            $result = $service->commitImport($validated['import_token'], $request->user());
+            $result = $service->commitImport(
+                $validated['import_token'],
+                $request->user(),
+                $request->boolean('full_replacement')
+            );
             return response()->json($result);
         } catch (\InvalidArgumentException $e) {
             return response()->json([
