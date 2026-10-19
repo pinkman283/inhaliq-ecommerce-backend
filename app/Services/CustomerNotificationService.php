@@ -26,8 +26,11 @@ class CustomerNotificationService
             }
 
             if ($phone) {
-                // SMS dispatch hook for local BD SMS gateways (e.g., Greenweb, Alpha SMS, Twilio)
+                // SMS dispatch hook for local BD SMS gateways (e.g., BulkSMS BD, Greenweb, Twilio)
                 self::sendSms($phone, "Dear {$order->customer_name}, your order #{$order->order_number} (৳{$order->total_amount}) has been received successfully. We will call you soon to confirm dispatch.");
+                
+                // WhatsApp Automated Order Confirmation
+                WhatsAppService::sendOrderConfirmation($order);
             }
         } catch (\Throwable $e) {
             Log::warning("Failed to send order confirmation notification: " . $e->getMessage());
@@ -48,6 +51,9 @@ class CustomerNotificationService
             if ($phone) {
                 $trackingInfo = $shipment->tracking_code ? "Tracking code: {$shipment->tracking_code}." : "";
                 self::sendSms($phone, "Dear {$order->customer_name}, your parcel #{$order->order_number} is dispatched via {$shipment->provider}. {$trackingInfo} Please keep ৳{$shipment->cod_amount} ready for Cash on Delivery.");
+                
+                // WhatsApp Automated Dispatch & Tracking Notice
+                WhatsAppService::sendOrderDispatched($order, $shipment);
             }
         } catch (\Throwable $e) {
             Log::warning("Failed to send shipment dispatch notification: " . $e->getMessage());
@@ -62,6 +68,9 @@ class CustomerNotificationService
         $phone = $order->customer_phone;
         if ($phone) {
             self::sendSms($phone, "Dear {$order->customer_name}, your order #{$order->order_number} has been delivered successfully. Thank you for shopping with us!");
+            
+            // WhatsApp Automated Delivery Success Notice
+            WhatsAppService::sendOrderDelivered($order);
         }
     }
 

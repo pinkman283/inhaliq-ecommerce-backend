@@ -132,6 +132,48 @@ class AdminOrderController extends Controller
         $perPage = (int) $request->input('per_page', 25);
         $orders = $query->paginate($perPage);
 
+        // Enrich each order with automated fraud & RTO return-risk metrics
+        $orders->getCollection()->transform(function ($order) {
+            $phone = $order->customer_phone;
+            $email = $order->customer_email;
+
+            $historyQuery = Order::where('id', '!=', $order->id);
+            if (!empty($phone)) {
+                $historyQuery->where('customer_phone', $phone);
+            } elseif (!empty($email)) {
+                $historyQuery->where('customer_email', $email);
+            } else {
+                $historyQuery->whereRaw('1 = 0');
+            }
+
+            $pastOrders = $historyQuery->select('id', 'order_status', 'payment_status')->get();
+            $totalPast = $pastOrders->count();
+            $cancelledOrReturned = $pastOrders->whereIn('order_status', ['cancelled', 'returned', 'refunded'])->count();
+            $deliveredPast = $pastOrders->where('order_status', 'delivered')->count();
+
+            // Calculate Fraud / Return Risk
+            if ($cancelledOrReturned >= 2 || ($totalPast > 0 && ($cancelledOrReturned / $totalPast) >= 0.5)) {
+                $riskLevel = 'high';
+                $fraudScore = 85;
+            } elseif ($order->payment_method === 'cash_on_delivery' && $totalPast === 0) {
+                $riskLevel = 'moderate';
+                $fraudScore = 35;
+            } elseif ($deliveredPast >= 2 && $cancelledOrReturned === 0) {
+                $riskLevel = 'low';
+                $fraudScore = 5;
+            } else {
+                $riskLevel = 'low';
+                $fraudScore = 15;
+            }
+
+            $order->risk_level = $riskLevel;
+            $order->fraud_score = $fraudScore;
+            $order->customer_order_count = $totalPast + 1;
+            $order->customer_return_count = $cancelledOrReturned;
+
+            return $order;
+        });
+
         return response()->json($orders);
     }
 
@@ -1066,6 +1108,155 @@ class AdminOrderController extends Controller
                 'message' => 'Price calculation error: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Get bulk printable thermal shipping labels for multiple orders (4x6 format)
+     */
+    public function bulkShippingLabels(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'orders.view', 'orders.manage');
+
+        $validated = $request->validate([
+            'order_ids' => 'required|array|min:1',
+            'order_ids.*' => 'integer|exists:orders,id',
+        ]);
+
+        $orders = Order::with(['items.product', 'latestShipment'])->whereIn('id', $validated['order_ids'])->get();
+        $appName = config('app.name', 'INHALIQ');
+
+        $labels = $orders->map(function ($order) use ($appName) {
+            $shipment = $order->latestShipment;
+            $shipAddress = $order->shipping_address ?? [];
+            $addressStr = is_array($shipAddress) ? ($shipAddress['address_line1'] ?? $shipAddress['address'] ?? 'Customer Address') : 'Customer Address';
+            $cityStr = is_array($shipAddress) ? ($shipAddress['city'] ?? 'Dhaka') : 'Dhaka';
+
+            return [
+                'order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'store_name' => $appName,
+                'sender_phone' => config('store.phone', '01700000000'),
+                'courier_name' => $shipment ? ucfirst($shipment->provider) : ($order->carrier ?: 'Steadfast Courier'),
+                'delivery_type' => 'Standard Express (COD)',
+                'consignment_id' => $shipment ? ($shipment->consignment_id ?: $shipment->tracking_code) : $order->order_number,
+                'tracking_code' => $shipment ? $shipment->tracking_code : ($order->tracking_code ?: 'Pending'),
+                'customer_name' => $order->customer_name,
+                'customer_phone' => $order->customer_phone ?: 'N/A',
+                'customer_address' => $addressStr,
+                'customer_city' => $cityStr,
+                'weight' => ($shipment ? $shipment->weight : 0.5) . ' kg',
+                'cod_amount' => $order->payment_status === 'paid' ? 0 : (float) $order->total_amount,
+                'notes' => $order->notes ?: 'Handle with care. Inspect before delivery.',
+                'date' => $order->created_at->format('d M Y'),
+                'items' => $order->items->map(function ($item) {
+                    return [
+                        'name' => $item->product_name ?: $item->product?->name,
+                        'variant' => $item->variant_name,
+                        'quantity' => $item->quantity,
+                    ];
+                }),
+            ];
+        });
+
+        return response()->json([
+            'labels' => $labels,
+            'count' => $labels->count(),
+        ]);
+    }
+
+    /**
+     * Bulk Courier Booking for selected orders
+     */
+    public function bulkBookCourier(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'orders.manage');
+
+        $validated = $request->validate([
+            'order_ids' => 'required|array|min:1',
+            'order_ids.*' => 'integer|exists:orders,id',
+            'provider' => 'nullable|string|in:steadfast,pathao,redx',
+        ]);
+
+        $provider = $validated['provider'] ?? 'steadfast';
+        $orders = Order::with(['latestShipment', 'items'])->whereIn('id', $validated['order_ids'])->get();
+
+        $courierManager = app(\App\Services\Courier\CourierManager::class);
+        $successCount = 0;
+        $failedCount = 0;
+        $messages = [];
+
+        foreach ($orders as $order) {
+            if ($order->order_status === 'cancelled' || $order->order_status === 'delivered') {
+                $failedCount++;
+                $messages[] = "Order #{$order->order_number} skipped (Status: {$order->order_status})";
+                continue;
+            }
+
+            try {
+                $shipAddress = $order->shipping_address ?? [];
+                $addressStr = is_array($shipAddress) ? ($shipAddress['address_line1'] ?? $shipAddress['address'] ?? 'Dhaka') : 'Dhaka';
+
+                $bookingPayload = [
+                    'recipient_name' => $order->customer_name,
+                    'recipient_phone' => $order->customer_phone,
+                    'recipient_address' => $addressStr,
+                    'cod_amount' => $order->payment_status === 'paid' ? 0 : (float) $order->total_amount,
+                    'note' => "Bulk dispatch for Order #{$order->order_number}",
+                    'weight' => 0.5,
+                ];
+
+                $res = $courierManager->driver($provider)->createShipment($bookingPayload);
+
+                if (!empty($res['success'])) {
+                    $shipment = Shipment::create([
+                        'order_id' => $order->id,
+                        'provider' => $provider,
+                        'consignment_id' => $res['consignment_id'] ?? null,
+                        'tracking_code' => $res['tracking_code'] ?? ($res['consignment_id'] ?? null),
+                        'tracking_url' => $res['tracking_url'] ?? null,
+                        'status' => 'in_transit',
+                        'recipient_name' => $order->customer_name,
+                        'recipient_phone' => $order->customer_phone,
+                        'recipient_address' => $addressStr,
+                        'cod_amount' => $bookingPayload['cod_amount'],
+                        'weight' => 0.5,
+                    ]);
+
+                    $order->update([
+                        'order_status' => 'shipped',
+                        'carrier' => ucfirst($provider),
+                        'tracking_code' => $shipment->tracking_code,
+                        'shipped_at' => now(),
+                    ]);
+
+                    // Send dispatch WhatsApp notification if enabled
+                    \App\Services\CustomerNotificationService::orderDispatched($order, $shipment);
+
+                    $successCount++;
+                } else {
+                    $failedCount++;
+                    $messages[] = "Order #{$order->order_number}: " . ($res['message'] ?? 'Courier rejected booking');
+                }
+            } catch (\Throwable $e) {
+                $failedCount++;
+                $messages[] = "Order #{$order->order_number} failed: " . $e->getMessage();
+            }
+        }
+
+        AuditLog::log(
+            $request->user(),
+            'courier.bulk_booked',
+            'Order',
+            null,
+            "Bulk booked {$successCount} orders with {$provider}."
+        );
+
+        return response()->json([
+            'message' => "Bulk courier booking finished. {$successCount} succeeded, {$failedCount} failed.",
+            'success_count' => $successCount,
+            'failed_count' => $failedCount,
+            'details' => $messages,
+        ]);
     }
 }
 

@@ -237,7 +237,31 @@ class AdminIntegrationController extends Controller
                 break;
 
             case 'whatsapp_business':
-                $message = "WhatsApp Cloud API graph endpoint verified ({$latency}ms)";
+                $phoneId = trim((string) ($creds['phone_number_id'] ?? ''));
+                $token = trim((string) ($creds['access_token'] ?? ''));
+                if (empty($phoneId) || empty($token)) {
+                    $success = false;
+                    $message = "Phone Number ID and Access Token are required.";
+                } elseif (str_starts_with($token, 'EAAG9920194810294') || str_contains($token, 'mock')) {
+                    $message = "WhatsApp Cloud API endpoint verified in Mock/Test Mode ({$latency}ms)";
+                } else {
+                    try {
+                        $graphRes = \Illuminate\Support\Facades\Http::withToken($token)
+                            ->timeout(6)
+                            ->get("https://graph.facebook.com/v21.0/{$phoneId}");
+                        if ($graphRes->successful()) {
+                            $data = $graphRes->json();
+                            $dispPhone = $data['display_phone_number'] ?? $phoneId;
+                            $message = "WhatsApp Cloud API connected successfully! Active Number: {$dispPhone} ({$latency}ms)";
+                        } else {
+                            $success = false;
+                            $message = "Meta API Error: " . ($graphRes->json()['error']['message'] ?? $graphRes->body());
+                        }
+                    } catch (\Throwable $e) {
+                        $success = false;
+                        $message = "Connection timeout or network error: " . $e->getMessage();
+                    }
+                }
                 break;
 
             case 'google_tag_manager':
@@ -497,5 +521,27 @@ class AdminIntegrationController extends Controller
         });
 
         return response()->json($cached);
+    }
+
+    /**
+     * Send live test message via WhatsApp Cloud API
+     */
+    public function sendTestWhatsApp(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'settings.manage');
+
+        $phone = $request->input('phone_number') ?? $request->input('phone');
+        if (empty($phone)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Recipient phone number is required.',
+            ], 422);
+        }
+
+        $msg = $request->input('message') ?: "Hello! This is a test message from your " . config('app.name', 'INHALIQ') . " WhatsApp Cloud API integration.";
+
+        $result = \App\Services\WhatsAppService::sendTextMessage((string) $phone, $msg);
+
+        return response()->json($result, $result['success'] ? 200 : 422);
     }
 }

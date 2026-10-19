@@ -67,6 +67,7 @@ class AdminPosController extends Controller
             'discount_amount' => 'nullable|numeric|min:0',
             'tax_amount' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string|max:1000',
+            'lead_id' => 'nullable|integer|exists:leads,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.variant_id' => 'nullable|exists:product_variants,id',
@@ -219,6 +220,29 @@ class AdminPosController extends Controller
 
             // Post Real Double-Entry Sale Journal Entry to General Ledger
             \App\Services\AccountingService::postOrderSale($order);
+
+            // If converted from an abandoned checkout lead, automatically update lead
+            if (!empty($validated['lead_id'])) {
+                $lead = \App\Models\Lead::find($validated['lead_id']);
+                if ($lead) {
+                    $convNote = "Converted via POS Terminal to Order #{$order->order_number}";
+                    $existingNotes = $lead->notes ? $lead->notes . "\n" : '';
+                    $lead->update([
+                        'status' => 'converted',
+                        'converted_order_id' => $order->id,
+                        'notes' => trim($existingNotes . $convNote),
+                    ]);
+
+                    AuditLog::log(
+                        $request->user(),
+                        'lead.converted_pos',
+                        'Lead',
+                        $lead->id,
+                        "Lead #{$lead->id} successfully converted to Order #{$order->order_number} via POS Terminal.",
+                        ['order_id' => $order->id, 'order_number' => $order->order_number]
+                    );
+                }
+            }
 
             // 3. Update Register Session Totals
             if ($validated['payment_method'] === 'cash') {

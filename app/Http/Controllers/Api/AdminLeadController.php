@@ -297,4 +297,53 @@ class AdminLeadController extends Controller
             ]);
         });
     }
+
+    /**
+     * Send 1-click WhatsApp cart recovery notification
+     */
+    public function sendWhatsAppRecovery(Request $request, int $id): JsonResponse
+    {
+        $this->checkPermission($request, 'leads.manage');
+
+        $lead = Lead::findOrFail($id);
+
+        if (empty($lead->phone)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This lead does not have a valid phone number on record.',
+            ], 422);
+        }
+
+        $discountCode = $request->input('discount_code');
+        $customMessage = $request->input('custom_message');
+
+        if (!empty($customMessage)) {
+            $result = \App\Services\WhatsAppService::sendTextMessage($lead->phone, $customMessage);
+        } else {
+            $result = \App\Services\WhatsAppService::sendAbandonedCartRecovery($lead, $discountCode);
+        }
+
+        if ($result['success']) {
+            if ($lead->status === 'new') {
+                $lead->update(['status' => 'contacted']);
+            }
+
+            $timestamp = now()->format('Y-m-d H:i');
+            $existingNotes = $lead->notes ? $lead->notes . "\n" : "";
+            $lead->update([
+                'notes' => $existingNotes . "[{$timestamp}] Sent 1-click WhatsApp abandoned cart recovery reminder."
+            ]);
+
+            AuditLog::log(
+                $request->user(),
+                'lead.whatsapp_recovery_sent',
+                'Lead',
+                $lead->id,
+                "Sent 1-click WhatsApp recovery message to {$lead->phone} for Lead #{$lead->id}",
+                ['lead_id' => $lead->id, 'phone' => $lead->phone, 'message_id' => $result['message_id'] ?? null]
+            );
+        }
+
+        return response()->json($result, $result['success'] ? 200 : 422);
+    }
 }

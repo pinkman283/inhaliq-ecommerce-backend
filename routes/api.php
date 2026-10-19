@@ -56,6 +56,7 @@ use App\Http\Controllers\Api\PromotionController;
 use App\Http\Controllers\Api\PublicBannerController;
 use App\Http\Controllers\Api\PublicNavigationController;
 use App\Http\Controllers\Api\ReviewController;
+use App\Http\Controllers\Api\TelemetryController;
 use App\Http\Controllers\Api\ThemeController;
 use Illuminate\Support\Facades\Route;
 
@@ -140,6 +141,7 @@ Route::get('/sitemap.xml', [AdminSettingsController::class, 'sitemapXml']);
 Route::get('/integrations/tracking', [AdminSettingsController::class, 'publicTrackingScripts']);
 Route::get('/system/redis-config', [AdminIntegrationController::class, 'getRedisConfig']);
 Route::post('/products/{productId}/reviews', [ReviewController::class, 'store'])->middleware('sliding-throttle:customer-reviews');
+Route::post('/telemetry/pageview', [TelemetryController::class, 'recordPageView']);
 
 // Dynamic Storefront Header Navigation
 Route::get('/navigation/header', [PublicNavigationController::class, 'header']);
@@ -345,6 +347,8 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::get('/orders/{id}/shipments/{shipmentId}/track', [AdminOrderController::class, 'trackShipment']);
     Route::post('/orders/{id}/shipments/{shipmentId}/cancel', [AdminOrderController::class, 'cancelShipment']);
     Route::get('/orders/{id}/shipments/{shipmentId}/label', [AdminOrderController::class, 'printShippingLabel']);
+    Route::post('/orders/bulk-book-courier', [AdminOrderController::class, 'bulkBookCourier']);
+    Route::post('/orders/bulk-labels', [AdminOrderController::class, 'bulkShippingLabels']);
 
     // Returns & RTO Management
     Route::get('/returns', [AdminReturnController::class, 'index']);
@@ -368,6 +372,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::put('/leads/{id}', [AdminLeadController::class, 'update']);
     Route::delete('/leads/{id}', [AdminLeadController::class, 'destroy']);
     Route::post('/leads/{id}/convert-to-order', [AdminLeadController::class, 'convertToOrder']);
+    Route::post('/leads/{id}/send-whatsapp-recovery', [AdminLeadController::class, 'sendWhatsAppRecovery']);
 
     // Customer Management & Risk Intelligence
     Route::get('/customers', [AdminCustomerController::class, 'index']);
@@ -552,6 +557,10 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::put('/settings/group/{group}', [AdminSettingsController::class, 'updateGroup']);
     Route::post('/system/cache-clear', [AdminSettingsController::class, 'clearCache']);
     Route::post('/system/sitemap/generate', [AdminSettingsController::class, 'generateSitemap']);
+    Route::get('/system/backups', [AdminSettingsController::class, 'listBackups']);
+    Route::post('/system/backups/create', [AdminSettingsController::class, 'createBackup']);
+    Route::get('/system/backups/download/{filename}', [AdminSettingsController::class, 'downloadBackup']);
+    Route::delete('/system/backups/{filename}', [AdminSettingsController::class, 'deleteBackup']);
 
     // Third-Party Integrations Hub
     Route::prefix('integrations')->group(function () {
@@ -561,10 +570,14 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
         Route::post('/{provider}/toggle', [AdminIntegrationController::class, 'toggle']);
         Route::post('/{provider}/test', [AdminIntegrationController::class, 'test']);
         Route::post('/{provider}/rotate-key', [AdminIntegrationController::class, 'rotateKey']);
+        Route::post('/whatsapp/send-test', [AdminIntegrationController::class, 'sendTestWhatsApp']);
     });
 
-    // 14 Specialized Business Intelligence Reports
+    // 14 Specialized Business Intelligence Reports & Detailed Acquisition Analytics
     Route::prefix('reports')->group(function () {
+        Route::get('/acquisition/detailed', [AdminReportController::class, 'getDetailedAcquisitionReport']);
+        Route::get('/acquisition/export-channels', [AdminReportController::class, 'exportAcquisitionChannelsCsv']);
+        Route::get('/acquisition/export-pageviews', [AdminReportController::class, 'exportAcquisitionPageViewsCsv']);
         Route::get('/{type}', [AdminReportController::class, 'show']);
         Route::get('/{type}/export', [AdminReportController::class, 'exportCsv']);
     });

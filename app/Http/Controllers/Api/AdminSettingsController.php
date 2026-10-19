@@ -14,6 +14,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 
 class AdminSettingsController extends Controller
 {
@@ -412,5 +414,173 @@ class AdminSettingsController extends Controller
                 ],
             ],
         ]);
+    }
+
+    /**
+     * Create an instantaneous raw SQL snapshot of the database.
+     */
+    public function createBackup(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'settings.manage');
+
+        $backupDir = storage_path('app/backups');
+        if (!File::isDirectory($backupDir)) {
+            File::makeDirectory($backupDir, 0755, true, true);
+        }
+
+        $timestamp = date('Y-m-d_His');
+        $filename = "backup_ecommerce_{$timestamp}.sql";
+        $filePath = "{$backupDir}/{$filename}";
+
+        $tables = DB::select('SHOW TABLES');
+        $dbName = config('database.connections.mysql.database', 'ecommerce');
+        $tableKey = "Tables_in_{$dbName}";
+
+        $handle = fopen($filePath, 'w');
+        fwrite($handle, "-- E-Commerce Database Snapshot\n");
+        fwrite($handle, "-- Generated At: " . date('Y-m-d H:i:s') . "\n");
+        fwrite($handle, "-- Database: {$dbName}\n\n");
+        fwrite($handle, "SET FOREIGN_KEY_CHECKS=0;\n\n");
+
+        $exportedCount = 0;
+        foreach ($tables as $tableObj) {
+            $table = $tableObj->$tableKey ?? current((array) $tableObj);
+            if (!$table) continue;
+
+            $createTableRes = DB::select("SHOW CREATE TABLE `{$table}`");
+            $createStatement = $createTableRes[0]->{'Create Table'} ?? null;
+
+            if ($createStatement) {
+                fwrite($handle, "-- ----------------------------\n");
+                fwrite($handle, "-- Table structure for {$table}\n");
+                fwrite($handle, "-- ----------------------------\n");
+                fwrite($handle, "DROP TABLE IF EXISTS `{$table}`;\n");
+                fwrite($handle, $createStatement . ";\n\n");
+            }
+
+            $rows = DB::table($table)->get();
+            if ($rows->count() > 0) {
+                fwrite($handle, "-- Records of {$table}\n");
+                foreach ($rows as $row) {
+                    $rowArray = (array) $row;
+                    $values = array_map(function ($val) {
+                        if ($val === null) return 'NULL';
+                        return "'" . addslashes((string) $val) . "'";
+                    }, array_values($rowArray));
+                    
+                    $columns = array_map(function ($col) {
+                        return "`{$col}`";
+                    }, array_keys($rowArray));
+
+                    fwrite($handle, "INSERT INTO `{$table}` (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $values) . ");\n");
+                }
+                fwrite($handle, "\n");
+            }
+            $exportedCount++;
+        }
+
+        fwrite($handle, "SET FOREIGN_KEY_CHECKS=1;\n");
+        fclose($handle);
+
+        $size = filesize($filePath);
+
+        return response()->json([
+            'success' => true,
+            'message' => "Database snapshot successfully created ({$exportedCount} tables exported).",
+            'backup' => [
+                'filename' => $filename,
+                'size_bytes' => $size,
+                'size_human' => $size >= 1048576 ? round($size / 1048576, 2) . ' MB' : round($size / 1024, 2) . ' KB',
+                'tables_count' => $exportedCount,
+                'created_at' => date('Y-m-d H:i:s'),
+                'download_url' => url("/api/admin/system/backups/download/{$filename}"),
+            ],
+        ]);
+    }
+
+    /**
+     * List all database snapshots.
+     */
+    public function listBackups(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'settings.manage');
+
+        $backupDir = storage_path('app/backups');
+        if (!File::isDirectory($backupDir)) {
+            File::makeDirectory($backupDir, 0755, true, true);
+        }
+
+        $files = File::files($backupDir);
+        $backups = [];
+
+        foreach ($files as $file) {
+            if ($file->getExtension() === 'sql' || $file->getExtension() === 'zip') {
+                $filename = $file->getFilename();
+                $size = $file->getSize();
+                $backups[] = [
+                    'filename' => $filename,
+                    'size_bytes' => $size,
+                    'size_human' => $size >= 1048576 
+                        ? round($size / 1048576, 2) . ' MB' 
+                        : round($size / 1024, 2) . ' KB',
+                    'created_at' => date('Y-m-d H:i:s', $file->getMTime()),
+                    'download_url' => url("/api/admin/system/backups/download/{$filename}"),
+                ];
+            }
+        }
+
+        usort($backups, fn($a, $b) => strcmp($b['created_at'], $a['created_at']));
+
+        $dbStats = [
+            'database' => config('database.connections.mysql.database', 'ecommerce'),
+            'total_users' => DB::table('users')->count(),
+            'total_orders' => DB::table('orders')->count(),
+            'total_products' => DB::table('products')->count(),
+            'total_invoices' => DB::table('sales_invoices')->count(),
+            'backup_count' => count($backups),
+            'last_backup' => $backups[0]['created_at'] ?? 'Never',
+        ];
+
+        return response()->json([
+            'backups' => $backups,
+            'stats' => $dbStats,
+        ]);
+    }
+
+    /**
+     * Download backup file.
+     */
+    public function downloadBackup(Request $request, string $filename)
+    {
+        $this->checkPermission($request, 'settings.manage');
+
+        $safeName = basename($filename);
+        $filePath = storage_path("app/backups/{$safeName}");
+
+        if (!File::exists($filePath)) {
+            return response()->json(['message' => 'Backup file not found.'], 404);
+        }
+
+        return response()->download($filePath, $safeName, [
+            'Content-Type' => 'application/sql',
+        ]);
+    }
+
+    /**
+     * Delete backup file.
+     */
+    public function deleteBackup(Request $request, string $filename): JsonResponse
+    {
+        $this->checkPermission($request, 'settings.manage');
+
+        $safeName = basename($filename);
+        $filePath = storage_path("app/backups/{$safeName}");
+
+        if (File::exists($filePath)) {
+            File::delete($filePath);
+            return response()->json(['success' => true, 'message' => "Backup {$safeName} deleted."]);
+        }
+
+        return response()->json(['message' => 'Backup file not found.'], 404);
     }
 }

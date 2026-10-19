@@ -7,18 +7,104 @@ use App\Models\Address;
 use App\Models\AuditLog;
 use App\Models\User;
 use App\Services\CustomerRiskService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 
 class AdminCustomerController extends Controller
 {
+    public static function computeRfmSegment($ordersCount, $totalSpent, $lastOrderAt, $createdAt): array
+    {
+        $now = Carbon::now();
+        $daysSinceLastOrder = $lastOrderAt ? (int) Carbon::parse($lastOrderAt)->diffInDays($now) : null;
+        $daysSinceJoined = (int) Carbon::parse($createdAt)->diffInDays($now);
+
+        if ($ordersCount === 0) {
+            if ($daysSinceJoined <= 30) {
+                return [
+                    'segment' => 'new',
+                    'label' => 'New Lead',
+                    'badge' => 'emerald',
+                    'recency_days' => null,
+                    'advice' => 'Send first-order welcome voucher via WhatsApp or SMS'
+                ];
+            }
+            return [
+                'segment' => 'inactive',
+                'label' => 'Inactive (0 Orders)',
+                'badge' => 'slate',
+                'recency_days' => null,
+                'advice' => 'Target with flash reactivation campaign'
+            ];
+        }
+
+        if ($ordersCount >= 4 || $totalSpent >= 8000) {
+            if ($daysSinceLastOrder !== null && $daysSinceLastOrder <= 45) {
+                return [
+                    'segment' => 'champions',
+                    'label' => 'VIP Champion',
+                    'badge' => 'purple',
+                    'recency_days' => $daysSinceLastOrder,
+                    'advice' => 'Reward with exclusive early access and VIP perks'
+                ];
+            }
+        }
+
+        if ($ordersCount >= 2) {
+            if ($daysSinceLastOrder !== null && $daysSinceLastOrder <= 60) {
+                return [
+                    'segment' => 'loyal',
+                    'label' => 'Loyal Buyer',
+                    'badge' => 'blue',
+                    'recency_days' => $daysSinceLastOrder,
+                    'advice' => 'Upsell complementary products and bundle discounts'
+                ];
+            }
+            return [
+                'segment' => 'at_risk',
+                'label' => 'At-Risk (Churn)',
+                'badge' => 'amber',
+                'recency_days' => $daysSinceLastOrder,
+                'advice' => 'Send "We Miss You" 15% recovery offer via WhatsApp'
+            ];
+        }
+
+        if ($ordersCount === 1) {
+            if ($daysSinceLastOrder !== null && $daysSinceLastOrder <= 30) {
+                return [
+                    'segment' => 'promising',
+                    'label' => 'Promising',
+                    'badge' => 'cyan',
+                    'recency_days' => $daysSinceLastOrder,
+                    'advice' => 'Prompt for product review & second purchase incentive'
+                ];
+            }
+            return [
+                'segment' => 'at_risk',
+                'label' => 'One-Time Slipping',
+                'badge' => 'amber',
+                'recency_days' => $daysSinceLastOrder,
+                'advice' => 'Re-engage before customer turns permanently inactive'
+            ];
+        }
+
+        return [
+            'segment' => 'general',
+            'label' => 'Standard Customer',
+            'badge' => 'slate',
+            'recency_days' => $daysSinceLastOrder,
+            'advice' => 'Standard engagement newsletters and promotions'
+        ];
+    }
+
     public function index(Request $request): JsonResponse
     {
         $this->checkPermission($request, 'customers.view', 'customers.manage');
 
         $query = User::where('role', 'customer')
             ->withCount('orders')
+            ->withMax('orders as last_order_at', 'created_at')
             ->withSum(['orders as total_spent' => function ($q) {
                 $q->where('payment_status', 'paid');
             }], 'total_amount')
@@ -46,11 +132,51 @@ class AdminCustomerController extends Controller
             $query->where('risk_level', $request->input('risk_level'));
         }
 
+        if ($request->filled('rfm_segment') && $request->input('rfm_segment') !== 'all') {
+            $rfm = $request->input('rfm_segment');
+            if ($rfm === 'champions') {
+                $query->whereHas('orders', function ($q) {
+                    $q->where('created_at', '>=', Carbon::now()->subDays(60));
+                }, '>=', 4);
+            } elseif ($rfm === 'loyal') {
+                $query->has('orders', '>=', 2);
+            } elseif ($rfm === 'promising') {
+                $query->has('orders', '=', 1)
+                    ->whereHas('orders', function ($q) {
+                        $q->where('created_at', '>=', Carbon::now()->subDays(30));
+                    });
+            } elseif ($rfm === 'at_risk') {
+                $query->whereHas('orders', function ($q) {
+                    $q->where('created_at', '<', Carbon::now()->subDays(45));
+                })->whereDoesntHave('orders', function ($q) {
+                    $q->where('created_at', '>=', Carbon::now()->subDays(45));
+                });
+            } elseif ($rfm === 'new') {
+                $query->where('created_at', '>=', Carbon::now()->subDays(30))->doesntHave('orders');
+            } elseif ($rfm === 'inactive') {
+                $query->doesntHave('orders');
+            }
+        }
+
         $perPage = (int) $request->input('per_page', 25);
         $customers = $query->paginate($perPage);
-        $customers->through(fn($c) => $c->makeVisible([
-            'risk_score', 'risk_level', 'risk_reasons', 'internal_notes', 'failed_login_attempts', 'locked_until', 'suspended_until', 'suspension_reason'
-        ]));
+        $customers->through(function ($c) {
+            $c->makeVisible([
+                'risk_score', 'risk_level', 'risk_reasons', 'internal_notes', 'failed_login_attempts', 'locked_until', 'suspended_until', 'suspension_reason'
+            ]);
+            $rfm = self::computeRfmSegment(
+                (int) ($c->orders_count ?? 0),
+                (float) ($c->total_spent ?? 0),
+                $c->last_order_at,
+                $c->created_at
+            );
+            $c->rfm_segment = $rfm['segment'];
+            $c->rfm_label = $rfm['label'];
+            $c->rfm_badge = $rfm['badge'];
+            $c->rfm_recency_days = $rfm['recency_days'];
+            $c->rfm_advice = $rfm['advice'];
+            return $c;
+        });
 
         return response()->json($customers);
     }
@@ -67,6 +193,7 @@ class AdminCustomerController extends Controller
                 }
             ])
             ->withCount('orders')
+            ->withMax('orders as last_order_at', 'created_at')
             ->withSum(['orders as total_spent' => function ($q) {
                 $q->where('payment_status', 'paid');
             }], 'total_amount')
@@ -81,11 +208,24 @@ class AdminCustomerController extends Controller
         $ipHistory = CustomerRiskService::getCustomerIpHistory($customer);
         $timeline = CustomerRiskService::getCustomerActivityTimeline($customer);
 
+        $rfm = self::computeRfmSegment(
+            (int) ($customer->orders_count ?? 0),
+            (float) ($customer->total_spent ?? 0),
+            $customer->last_order_at,
+            $customer->created_at
+        );
+
         $response = $customer->toArray();
         $response['risk_analysis'] = $riskData['risk'];
         $response['risk_metrics'] = $riskData['metrics'];
         $response['ip_history'] = $ipHistory;
         $response['activity_timeline'] = $timeline;
+        $response['rfm'] = array_merge($rfm, [
+            'orders_count' => (int) ($customer->orders_count ?? 0),
+            'total_spent' => (float) ($customer->total_spent ?? 0),
+            'aov' => ($customer->orders_count > 0) ? round((float) $customer->total_spent / $customer->orders_count, 2) : 0,
+            'last_order_at' => $customer->last_order_at,
+        ]);
 
         return response()->json($response);
     }
