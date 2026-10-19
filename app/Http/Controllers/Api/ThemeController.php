@@ -46,6 +46,8 @@ class ThemeController extends Controller
             $effectiveSplitLogo = $logoPlacements['split_reveal'] ?? $get('split_reveal_logo', '');
 
             return [
+                'currency' => $get('currency', 'BDT'),
+                'currency_symbol' => $get('currency_symbol', '৳'),
                 'theme_primary_color' => $get('theme_primary_color', '#005826'),
                 'theme_secondary_color' => $get('theme_secondary_color', '#2da54b'),
                 'theme_accent_gradient' => $get('theme_accent_gradient', 'emerald-teal'),

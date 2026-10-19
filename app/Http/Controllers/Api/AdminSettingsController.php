@@ -73,6 +73,14 @@ class AdminSettingsController extends Controller
             Setting::set('vat_rate', $rateStr, 'tax', 'number', 'Default VAT Rate (%)');
         }
 
+        // Keep currency and currency_symbol synchronized
+        if (isset($newValues['currency_symbol'])) {
+            Setting::set('currency_symbol', (string) $newValues['currency_symbol'], 'general', 'string', 'Currency Symbol');
+        } elseif (isset($newValues['currency'])) {
+            $sym = $newValues['currency'] === 'BDT' ? '৳' : ($newValues['currency'] === 'USD' ? '$' : ($newValues['currency'] === 'EUR' ? '€' : ($newValues['currency'] === 'GBP' ? '£' : '$')));
+            Setting::set('currency_symbol', $sym, 'general', 'string', 'Currency Symbol');
+        }
+
         // Keep store_brand_name and split_reveal_title in sync if store_name is updated
         if (isset($newValues['store_name']) && !empty($newValues['store_name'])) {
             $brand = $newValues['store_name'];

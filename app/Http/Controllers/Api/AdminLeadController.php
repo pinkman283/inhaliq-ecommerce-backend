@@ -108,6 +108,9 @@ class AdminLeadController extends Controller
         ]);
 
         $oldStatus = $lead->status;
+        if (isset($validated['status']) && $validated['status'] !== 'converted') {
+            $validated['converted_order_id'] = null;
+        }
         $lead->update($validated);
 
         AuditLog::log(

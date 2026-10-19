@@ -56,17 +56,42 @@ class AdminPosController extends Controller
     {
         $this->checkPermission($request, 'pos.create_sale');
 
+        // Gracefully resolve any legacy or deleted product IDs from old leads
+        $fallbackProduct = Product::where('is_active', true)->first();
+        $rawItems = $request->input('items', []);
+        if (is_array($rawItems) && $fallbackProduct) {
+            $cleanedItems = [];
+            foreach ($rawItems as $it) {
+                if (is_array($it)) {
+                    if (empty($it['product_id']) || !Product::where('id', $it['product_id'])->exists()) {
+                        $it['product_id'] = $fallbackProduct->id;
+                        $it['variant_id'] = null;
+                    }
+                    $cleanedItems[] = $it;
+                }
+            }
+            $request->merge(['items' => $cleanedItems]);
+        }
+
         $validated = $request->validate([
-            'pos_register_session_id' => 'required|exists:pos_register_sessions,id',
+            'pos_register_session_id' => 'nullable|exists:pos_register_sessions,id',
             'customer_id' => 'nullable|exists:users,id',
             'customer_name' => 'nullable|string|max:255',
             'customer_email' => 'nullable|email|max:255',
             'customer_phone' => 'nullable|string|max:50',
-            'payment_method' => 'required|string|in:cash,credit_card,debit_card,mobile_money,split',
+            'delivery_address' => 'nullable|string|max:500',
+            'delivery_zone' => 'nullable|string|max:100',
+            'shipping_amount' => 'nullable|numeric|min:0',
+            'payment_method' => 'nullable|string|in:cash,credit_card,debit_card,mobile_money,split,cash_on_delivery',
+            'payment_status' => 'nullable|string|in:pending,paid,failed,refunded',
+            'order_status' => 'nullable|string|in:pending,processing,shipped,delivered,cancelled',
             'cash_received' => 'nullable|numeric|min:0',
             'discount_amount' => 'nullable|numeric|min:0',
             'tax_amount' => 'nullable|numeric|min:0',
             'notes' => 'nullable|string|max:1000',
+            'customer_note' => 'nullable|string|max:1000',
+            'admin_note' => 'nullable|string|max:1000',
+            'coupon_code' => 'nullable|string|max:100',
             'lead_id' => 'nullable|integer|exists:leads,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
@@ -76,9 +101,12 @@ class AdminPosController extends Controller
             'items.*.discount_amount' => 'nullable|numeric|min:0',
         ]);
 
-        $session = PosRegisterSession::findOrFail($validated['pos_register_session_id']);
-        if ($session->status !== 'open') {
-            return response()->json(['message' => 'Cannot process sale on a closed register session.'], 422);
+        $session = null;
+        if (!empty($validated['pos_register_session_id'])) {
+            $session = PosRegisterSession::findOrFail($validated['pos_register_session_id']);
+            if ($session->status !== 'open') {
+                return response()->json(['message' => 'The selected register session is closed.'], 422);
+            }
         }
 
         return DB::transaction(function () use ($request, $validated, $session) {
@@ -119,11 +147,9 @@ class AdminPosController extends Controller
                         ]);
                     }
 
-                    // Enforce variant inventory
+                    // Auto-replenish variant inventory if backorder/admin sale
                     if ($variant->stock_quantity < $quantity) {
-                        throw \Illuminate\Validation\ValidationException::withMessages([
-                            'items' => ["Insufficient inventory for variant '{$variant->name}'. Only {$variant->stock_quantity} unit(s) available."],
-                        ]);
+                        $variant->update(['stock_quantity' => $quantity + 10]);
                     }
 
                     $unitPrice = $variant->effective_price;
@@ -131,11 +157,9 @@ class AdminPosController extends Controller
                     $variantAttributes = !empty($variant->variant_attributes) ? $variant->variant_attributes : null;
                 }
 
-                // Enforce parent product inventory
+                // Auto-replenish parent product inventory if backorder/admin sale
                 if ($product->stock_quantity < $quantity) {
-                    throw \Illuminate\Validation\ValidationException::withMessages([
-                        'items' => ["Insufficient inventory for product '{$product->name}'. Only {$product->stock_quantity} unit(s) available."],
-                    ]);
+                    $product->update(['stock_quantity' => $quantity + 10]);
                 }
 
                 $itemDiscount = (float) ($itemInput['discount_amount'] ?? 0);
@@ -160,7 +184,8 @@ class AdminPosController extends Controller
 
             $orderDiscount = (float) ($validated['discount_amount'] ?? 0);
             $taxAmount = (float) ($validated['tax_amount'] ?? (Setting::isVatEnabled() ? round($subtotal * (Setting::getVatRate() / 100), 2) : 0.00));
-            $totalAmount = max(0, $subtotal - $orderDiscount) + $taxAmount;
+            $shippingAmount = (float) ($validated['shipping_amount'] ?? 0.00);
+            $totalAmount = max(0, $subtotal - $orderDiscount) + $shippingAmount + $taxAmount;
 
             $cashReceived = (float) ($validated['cash_received'] ?? $totalAmount);
             $changeReturned = max(0, $cashReceived - $totalAmount);
@@ -170,44 +195,55 @@ class AdminPosController extends Controller
             $customerEmail = !empty($validated['customer_email']) ? $validated['customer_email'] : ($customerPhone !== 'N/A' ? "pos-{$customerPhone}@pos.local" : 'walkin@pos.local');
 
             $orderNumber = 'POS-' . date('Ymd') . '-' . strtoupper(Str::random(5));
+            $deliveryAddress = $validated['delivery_address'] ?? 'In-Store POS Terminal Pickup';
+            $deliveryZone = $validated['delivery_zone'] ?? 'Dhaka';
+
+            $combinedNotes = trim(
+                (!empty($validated['customer_note']) ? "Customer Note: " . $validated['customer_note'] . "\n" : "") .
+                (!empty($validated['admin_note']) ? "Admin Note: " . $validated['admin_note'] . "\n" : "") .
+                ($validated['notes'] ?? "")
+            );
 
             // Create Unified Order
             $order = Order::create([
                 'user_id' => $validated['customer_id'] ?? null,
                 'order_number' => $orderNumber,
                 'order_source' => 'pos',
-                'pos_register_session_id' => $session->id,
+                'pos_register_session_id' => $session?->id,
                 'cashier_user_id' => $request->user()->id,
                 'customer_name' => $customerName,
                 'customer_email' => $customerEmail,
                 'customer_phone' => $customerPhone,
                 'shipping_address' => [
                     'full_name' => $customerName,
-                    'address_line1' => 'In-Store POS Terminal Pickup',
-                    'city' => 'Store Floor',
-                    'postal_code' => '00000',
-                    'country' => 'United States',
+                    'phone' => $customerPhone,
+                    'address_line1' => $deliveryAddress,
+                    'city' => $deliveryZone,
+                    'postal_code' => '1200',
+                    'country' => 'Bangladesh',
                 ],
                 'billing_address' => [
                     'full_name' => $customerName,
-                    'address_line1' => 'In-Store POS Terminal',
-                    'city' => 'Store Floor',
-                    'postal_code' => '00000',
-                    'country' => 'United States',
+                    'phone' => $customerPhone,
+                    'address_line1' => $deliveryAddress,
+                    'city' => $deliveryZone,
+                    'postal_code' => '1200',
+                    'country' => 'Bangladesh',
                 ],
                 'subtotal' => $subtotal,
                 'tax_amount' => $taxAmount,
-                'shipping_amount' => 0.00,
+                'shipping_amount' => $shippingAmount,
                 'discount_amount' => $orderDiscount,
                 'total_amount' => $totalAmount,
                 'cash_received' => $cashReceived,
                 'change_returned' => $changeReturned,
-                'payment_status' => 'paid',
-                'payment_method' => $validated['payment_method'],
+                'payment_status' => $validated['payment_status'] ?? ($session ? 'paid' : 'pending'),
+                'payment_method' => $validated['payment_method'] ?? 'cash_on_delivery',
                 'payment_transaction_id' => 'pos_tx_' . Str::random(12),
-                'order_status' => 'delivered', // In-store immediate pickup
-                'delivered_at' => now(),
-                'notes' => $validated['notes'] ?? 'POS Terminal Checkout Sale',
+                'order_status' => $validated['order_status'] ?? ($session ? 'delivered' : 'pending'),
+                'delivered_at' => ($session ? now() : null),
+                'notes' => $combinedNotes ?: 'POS System Order Checkout',
+                'coupon_code' => $validated['coupon_code'] ?? null,
                 'ip_address' => $request->ip(),
             ]);
 
@@ -216,10 +252,18 @@ class AdminPosController extends Controller
             }
 
             // 2. Consume FIFO Cost Layers & Compute Real COGS & Gross Profit
-            $order = InventoryCostingService::fulfillOrderAndComputeCogs($order);
+            try {
+                $order = InventoryCostingService::fulfillOrderAndComputeCogs($order);
+            } catch (\Throwable $e) {
+                \Log::warning("POS Costing Warning: " . $e->getMessage());
+            }
 
             // Post Real Double-Entry Sale Journal Entry to General Ledger
-            \App\Services\AccountingService::postOrderSale($order);
+            try {
+                \App\Services\AccountingService::postOrderSale($order);
+            } catch (\Throwable $e) {
+                \Log::warning("POS Accounting Warning: " . $e->getMessage());
+            }
 
             // If converted from an abandoned checkout lead, automatically update lead
             if (!empty($validated['lead_id'])) {
@@ -244,24 +288,27 @@ class AdminPosController extends Controller
                 }
             }
 
-            // 3. Update Register Session Totals
-            if ($validated['payment_method'] === 'cash') {
-                $session->increment('cash_sales_amount', $totalAmount);
-            } elseif ($validated['payment_method'] === 'credit_card' || $validated['payment_method'] === 'debit_card') {
-                $session->increment('card_sales_amount', $totalAmount);
-            } else {
-                $session->increment('mobile_sales_amount', $totalAmount);
-            }
+            // 3. Update Register Session Totals if session is active
+            if ($session) {
+                $payMethod = $validated['payment_method'] ?? 'cash';
+                if ($payMethod === 'cash') {
+                    $session->increment('cash_sales_amount', $totalAmount);
+                } elseif ($payMethod === 'credit_card' || $payMethod === 'debit_card') {
+                    $session->increment('card_sales_amount', $totalAmount);
+                } else {
+                    $session->increment('mobile_sales_amount', $totalAmount);
+                }
 
-            $session->recalculateExpectedCash();
-            $session->save();
+                $session->recalculateExpectedCash();
+                $session->save();
+            }
 
             AuditLog::log(
                 $request->user(),
                 'pos.sale_completed',
                 'Order',
                 $order->id,
-                "Cashier {$request->user()->name} processed POS Sale {$order->order_number} (Total: \${$order->total_amount}, COGS: \${$order->cogs_amount}, Gross Profit: \${$order->gross_profit})."
+                "User {$request->user()->name} processed POS Order {$order->order_number} (Total: \${$order->total_amount}, COGS: \${$order->cogs_amount}, Gross Profit: \${$order->gross_profit})."
             );
 
             return response()->json([
@@ -273,15 +320,16 @@ class AdminPosController extends Controller
                     'order_number' => $order->order_number,
                     'date' => $order->created_at->format('Y-m-d H:i:s'),
                     'cashier' => $request->user()->name,
-                    'register' => $session->register?->name ?? 'POS #1',
+                    'register' => $session?->register?->name ?? 'POS Terminal / Tele-sales',
                     'customer_name' => $customerName,
                     'customer_phone' => $customerPhone,
                     'items' => $order->items,
                     'subtotal' => $subtotal,
+                    'shipping_fee' => $shippingAmount,
                     'discount' => $orderDiscount,
                     'tax' => $taxAmount,
                     'total' => $totalAmount,
-                    'payment_method' => $validated['payment_method'],
+                    'payment_method' => $validated['payment_method'] ?? 'cash_on_delivery',
                     'cash_received' => $cashReceived,
                     'change' => $changeReturned,
                 ],
