@@ -35,9 +35,56 @@ class CustomerRiskService
         $refundRate = $totalOrders > 0 ? round(($refundedOrders / $totalOrders) * 100, 1) : 0.0;
         $failedRate = $totalOrders > 0 ? round(($failedOrders / $totalOrders) * 100, 1) : 0.0;
 
+        // Dedicated Cash On Delivery (COD) Return & RTO Metrics
+        $codOrders = $orders->filter(function ($o) {
+            return in_array($o->payment_method, ['cash_on_delivery', 'cod', 'cash']) 
+                || $o->payment_status === 'pending';
+        });
+        $codOrdersCount = $codOrders->count();
+        $codDeliveredCount = $codOrders->where('order_status', 'delivered')->count();
+        $codReturnedCount = $codOrders->filter(function ($o) {
+            return in_array($o->order_status, ['returned', 'rto'])
+                || in_array($o->return_status, ['returned', 'rto'])
+                || ($o->order_status === 'cancelled' && ($o->shipped_at !== null || $o->tracking_code !== null));
+        })->count();
+        $codInTransitCount = $codOrders->whereIn('order_status', ['shipped', 'processing'])->count();
+
+        $codReturnRate = $codOrdersCount > 0 ? round(($codReturnedCount / $codOrdersCount) * 100, 1) : 0.0;
+        $codDeliveryRate = $codOrdersCount > 0 ? round(($codDeliveredCount / $codOrdersCount) * 100, 1) : 100.0;
+
+        // Calculate Specific COD Return Risk Score (0-100)
+        if ($codOrdersCount === 0) {
+            $codRiskScore = 15;
+            $codRiskLevel = 'low';
+            $codRiskRecommendation = "First-time COD buyer. Standard order verification recommended before initial dispatch.";
+        } else {
+            if ($codReturnedCount >= 2 || $codReturnRate >= 40) {
+                $codRiskScore = min(100, max(75, (int) round($codReturnRate + ($codReturnedCount * 10))));
+                $codRiskLevel = 'high';
+                $codRiskRecommendation = "High COD Return Risk ({$codReturnRate}% RTO rate). Require advance delivery charge deposit (৳120-150) before dispatching.";
+            } elseif ($codReturnedCount >= 1 || $codReturnRate >= 15) {
+                $codRiskScore = min(74, max(35, (int) round($codReturnRate * 1.5 + 20)));
+                $codRiskLevel = 'moderate';
+                $codRiskRecommendation = "Moderate COD Return Risk. Verify delivery address and contact number via phone call before dispatch.";
+            } else {
+                $codRiskScore = min(25, (int) round($codReturnRate));
+                $codRiskLevel = 'low';
+                $codRiskRecommendation = "Trusted COD buyer ({$codDeliveryRate}% delivery rate). Approved for 100% Cash on Delivery fulfillment.";
+            }
+        }
+
         // 2. Compute Risk Signals
         $score = 0;
         $reasons = [];
+
+        // COD Return Penalty
+        if ($codReturnedCount >= 2) {
+            $score += 35;
+            $reasons[] = "{$codReturnedCount} Cash-on-Delivery parcels returned to origin (RTO) - Return rate {$codReturnRate}%";
+        } elseif ($codReturnedCount === 1) {
+            $score += 15;
+            $reasons[] = "1 Cash-on-Delivery parcel previously returned/cancelled after dispatch";
+        }
 
         // Cancellation Frequency in time windows
         $now = now();
@@ -157,6 +204,17 @@ class CustomerRiskService
                 'level' => $level,
                 'reasons' => $reasons,
                 'recommendation' => $recommendation,
+            ],
+            'cod_risk' => [
+                'score' => $codRiskScore,
+                'level' => $codRiskLevel,
+                'orders_count' => $codOrdersCount,
+                'delivered_count' => $codDeliveredCount,
+                'returned_count' => $codReturnedCount,
+                'in_transit_count' => $codInTransitCount,
+                'return_rate' => $codReturnRate,
+                'delivery_rate' => $codDeliveryRate,
+                'recommendation' => $codRiskRecommendation,
             ],
         ];
     }

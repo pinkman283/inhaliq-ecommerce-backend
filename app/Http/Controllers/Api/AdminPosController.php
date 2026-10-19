@@ -265,16 +265,13 @@ class AdminPosController extends Controller
                 \Log::warning("POS Accounting Warning: " . $e->getMessage());
             }
 
-            // If converted from an abandoned checkout lead, automatically update lead
+            // If converted from an abandoned checkout lead, automatically update lead status and order link
             if (!empty($validated['lead_id'])) {
                 $lead = \App\Models\Lead::find($validated['lead_id']);
                 if ($lead) {
-                    $convNote = "Converted via POS Terminal to Order #{$order->order_number}";
-                    $existingNotes = $lead->notes ? $lead->notes . "\n" : '';
                     $lead->update([
                         'status' => 'converted',
                         'converted_order_id' => $order->id,
-                        'notes' => trim($existingNotes . $convNote),
                     ]);
 
                     AuditLog::log(

@@ -108,6 +108,30 @@ class AdminLeadController extends Controller
         ]);
 
         $oldStatus = $lead->status;
+
+        // Converted status is a terminal milestone. Only Super Administrators can un-convert or adjust it.
+        if ($oldStatus === 'converted' && isset($validated['status']) && $validated['status'] !== 'converted') {
+            $user = $request->user();
+            if (!$user || !$user->isSuperAdmin()) {
+                return response()->json([
+                    'message' => 'This lead has already been converted into a sale. Only a Super Administrator can un-convert or adjust its status.'
+                ], 403);
+            }
+
+            AuditLog::log(
+                $user,
+                'lead.status_overridden_by_superadmin',
+                'Lead',
+                $lead->id,
+                "Super Administrator overrode converted status for Lead #{$lead->id} from 'converted' to '{$validated['status']}'",
+                [
+                    'old_status' => 'converted',
+                    'new_status' => $validated['status'],
+                    'previous_order_id' => $lead->converted_order_id,
+                ]
+            );
+        }
+
         if (isset($validated['status']) && $validated['status'] !== 'converted') {
             $validated['converted_order_id'] = null;
         }
@@ -124,7 +148,7 @@ class AdminLeadController extends Controller
 
         return response()->json([
             'message' => 'Lead updated successfully',
-            'lead' => $lead,
+            'lead' => $lead->load(['user', 'convertedOrder']),
         ]);
     }
 

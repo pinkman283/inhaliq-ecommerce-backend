@@ -104,6 +104,22 @@ class AdminCustomerController extends Controller
 
         $query = User::where('role', 'customer')
             ->withCount('orders')
+            ->withCount(['orders as cod_orders_count' => function ($q) {
+                $q->whereIn('payment_method', ['cash_on_delivery', 'cod', 'cash']);
+            }])
+            ->withCount(['orders as cod_returned_count' => function ($q) {
+                $q->whereIn('payment_method', ['cash_on_delivery', 'cod', 'cash'])
+                  ->where(function ($sub) {
+                      $sub->whereIn('order_status', ['returned', 'rto'])
+                          ->orWhereIn('return_status', ['returned', 'rto'])
+                          ->orWhere(function ($cancelQ) {
+                              $cancelQ->where('order_status', 'cancelled')
+                                      ->where(function ($c2) {
+                                          $c2->whereNotNull('shipped_at')->orWhereNotNull('tracking_code');
+                                      });
+                          });
+                  });
+            }])
             ->withMax('orders as last_order_at', 'created_at')
             ->withSum(['orders as total_spent' => function ($q) {
                 $q->where('payment_status', 'paid');
@@ -175,6 +191,21 @@ class AdminCustomerController extends Controller
             $c->rfm_badge = $rfm['badge'];
             $c->rfm_recency_days = $rfm['recency_days'];
             $c->rfm_advice = $rfm['advice'];
+
+            $codTotal = (int) ($c->cod_orders_count ?? 0);
+            $codRet = (int) ($c->cod_returned_count ?? 0);
+            $codRate = $codTotal > 0 ? round(($codRet / $codTotal) * 100, 1) : 0.0;
+            $codLevel = 'low';
+            if ($codTotal > 0 && ($codRet >= 2 || $codRate >= 40)) {
+                $codLevel = 'high';
+            } elseif ($codTotal > 0 && ($codRet >= 1 || $codRate >= 15)) {
+                $codLevel = 'moderate';
+            }
+            $c->cod_orders_count = $codTotal;
+            $c->cod_returned_count = $codRet;
+            $c->cod_return_rate = $codRate;
+            $c->cod_risk_level = $codLevel;
+
             return $c;
         });
 
@@ -218,6 +249,7 @@ class AdminCustomerController extends Controller
         $response = $customer->toArray();
         $response['risk_analysis'] = $riskData['risk'];
         $response['risk_metrics'] = $riskData['metrics'];
+        $response['cod_risk'] = $riskData['cod_risk'];
         $response['ip_history'] = $ipHistory;
         $response['activity_timeline'] = $timeline;
         $response['rfm'] = array_merge($rfm, [
