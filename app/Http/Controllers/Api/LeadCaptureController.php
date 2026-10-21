@@ -61,6 +61,9 @@ class LeadCaptureController extends Controller
         } else {
             $leadData['status'] = 'new';
             $lead = Lead::create($leadData);
+
+            // Notify authorized staff & admins of new incoming lead
+            \App\Services\AdminNotificationService::notifyNewLead($lead);
         }
 
         return response()->json([

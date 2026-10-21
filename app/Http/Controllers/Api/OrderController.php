@@ -425,6 +425,9 @@ class OrderController extends Controller
                 // Send customer confirmation email & SMS
                 \App\Services\CustomerNotificationService::sendOrderConfirmation($order);
 
+                // Dispatch internal operational notification to authorized staff & admins
+                \App\Services\AdminNotificationService::notifyNewOrder($order);
+
                 return $order->load('items');
             });
 

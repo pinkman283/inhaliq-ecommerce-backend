@@ -221,4 +221,10 @@ class User extends Authenticatable
     {
         return $this->hasMany(CustomerWishlistItem::class);
     }
+
+    public function adminNotifications(): HasMany
+    {
+        return $this->hasMany(AdminNotification::class);
+    }
 }
+

@@ -23,6 +23,7 @@ use App\Http\Controllers\Api\AdminInventoryMovementController;
 use App\Http\Controllers\Api\AdminInventoryValuationController;
 use App\Http\Controllers\Api\AdminLeadController;
 use App\Http\Controllers\Api\AdminNavigationController;
+use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\AdminOnlineStoreController;
 use App\Http\Controllers\Api\AdminOrderController;
 use App\Http\Controllers\Api\AdminPosController;
@@ -284,6 +285,15 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
 
     // Executive Overview & Analytics
     Route::get('/analytics', [AdminController::class, 'analytics']);
+
+    // Operational Administrative In-App Notifications
+    Route::prefix('notifications')->group(function () {
+        Route::get('/', [AdminNotificationController::class, 'index']);
+        Route::get('/unread-count', [AdminNotificationController::class, 'unreadCount']);
+        Route::post('/mark-all-read', [AdminNotificationController::class, 'markAllAsRead']);
+        Route::post('/{id}/read', [AdminNotificationController::class, 'markAsRead']);
+        Route::delete('/{id}', [AdminNotificationController::class, 'destroy']);
+    });
 
     // Product Management
     Route::get('/products', [AdminProductController::class, 'index']);
