@@ -159,6 +159,12 @@ Route::get('/homepage/sections/{id}/tab-products', [HomepageSectionController::c
 Route::get('/colors', function () {
     return response()->json(\App\Models\Color::where('status', 'active')->orderBy('name')->get());
 });
+Route::get('/blog/categories', function () {
+    return response()->json(\App\Models\BlogCategory::where('status', 'active')->withCount(['posts' => fn($q) => $q->where('status', 'published')])->get());
+});
+Route::get('/blog/tags', function () {
+    return response()->json(\App\Models\BlogTag::all());
+});
 Route::get('/blog/posts', function (\Illuminate\Http\Request $request) {
     $q = \App\Models\BlogPost::where('status', 'published')->with(['category', 'tags', 'author:id,name']);
     if ($request->filled('category')) {
@@ -167,31 +173,45 @@ Route::get('/blog/posts', function (\Illuminate\Http\Request $request) {
     if ($request->filled('tag')) {
         $q->whereHas('tags', fn($t) => $t->where('slug', $request->input('tag')));
     }
+    if ($request->filled('search')) {
+        $searchTerm = '%' . $request->input('search') . '%';
+        $q->where(function($sub) use ($searchTerm) {
+            $sub->where('title', 'like', $searchTerm)
+                ->orWhere('excerpt', 'like', $searchTerm)
+                ->orWhere('content', 'like', $searchTerm);
+        });
+    }
     return response()->json($q->latest('published_at')->paginate(12));
 });
-Route::get('/blog/posts/{slug}', function (string $slug) {
+$singleBlogPostHandler = function (string $slug) {
     $post = \App\Models\BlogPost::where('slug', $slug)
         ->where('status', 'published')
-        ->with(['category', 'tags', 'author:id,name', 'comments' => fn($c) => $c->where('status', 'approved')->latest()])
+        ->with(['category', 'tags', 'author:id,name', 'comments' => fn($c) => $c->where('is_approved', true)->latest()])
         ->firstOrFail();
     $post->increment('views_count');
     return response()->json($post);
-});
-Route::post('/blog/posts/{id}/comments', function (\Illuminate\Http\Request $request, int $id) {
+};
+Route::get('/blog/posts/{slug}', $singleBlogPostHandler);
+Route::get('/blog/post/{slug}', $singleBlogPostHandler);
+
+$commentSubmissionHandler = function (\Illuminate\Http\Request $request, int $id) {
     $validated = $request->validate([
-        'author_name' => 'required|string|max:100',
-        'author_email' => 'required|email|max:150',
+        'author_name' => 'nullable|string|max:100',
+        'author_email' => 'nullable|email|max:150',
         'comment' => 'required|string|max:2000',
     ]);
     $comment = \App\Models\BlogComment::create([
         'post_id' => $id,
-        'author_name' => $validated['author_name'],
-        'author_email' => $validated['author_email'],
+        'user_id' => auth('sanctum')->id(),
+        'author_name' => $validated['author_name'] ?? (auth('sanctum')->user()?->name ?? 'Guest Reader'),
+        'author_email' => $validated['author_email'] ?? (auth('sanctum')->user()?->email ?? 'guest@example.com'),
         'comment' => $validated['comment'],
         'is_approved' => false,
     ]);
     return response()->json(['message' => 'Comment submitted for moderation.', 'comment' => $comment], 201);
-})->middleware('sliding-throttle:customer-reviews');
+};
+Route::post('/blog/posts/{id}/comments', $commentSubmissionHandler)->middleware('sliding-throttle:customer-reviews');
+Route::post('/customer/blog/post/{id}/comment', $commentSubmissionHandler)->middleware('sliding-throttle:customer-reviews');
 Route::get('/pages/{slug}', function (string $slug) {
     return response()->json(\App\Models\CmsPage::where('slug', $slug)->where('is_active', true)->firstOrFail());
 });
@@ -298,6 +318,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     // Product Management
     Route::get('/products', [AdminProductController::class, 'index']);
     Route::get('/products/export', [AdminProductController::class, 'export']);
+    Route::get('/products/import/template', [AdminProductController::class, 'downloadTemplate']);
     Route::post('/products/import/validate', [AdminProductController::class, 'importValidate']);
     Route::post('/products/import/commit', [AdminProductController::class, 'importCommit']);
     Route::get('/products/{id}', [AdminProductController::class, 'show']);
@@ -306,6 +327,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::post('/products', [AdminProductController::class, 'store']);
     Route::post('/products/bulk-delete', [AdminProductController::class, 'bulkDestroy']);
     Route::post('/products/bulk-update', [AdminProductController::class, 'bulkUpdate']);
+    Route::post('/products/bulk-quick-save', [AdminProductController::class, 'bulkQuickSave']);
     Route::put('/products/{id}', [AdminProductController::class, 'update']);
     Route::delete('/products/{id}', [AdminProductController::class, 'destroy']);
 
@@ -407,6 +429,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::get('/blocked-ips/{id}/related', [AdminBlockedIpController::class, 'relatedEntities']);
     Route::post('/blocked-ips', [AdminBlockedIpController::class, 'store'])->middleware('sliding-throttle:sensitive-admin-action');
     Route::delete('/blocked-ips/{id}', [AdminBlockedIpController::class, 'destroy'])->middleware('sliding-throttle:sensitive-admin-action');
+    Route::post('/blocked-ips/bulk-delete', [AdminBlockedIpController::class, 'bulkDestroy'])->middleware('sliding-throttle:sensitive-admin-action');
 
     // Enterprise Promotions & Discounts Suite
     Route::prefix('promotions')->group(function () {
@@ -453,6 +476,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::post('/vendors', [AdminVendorController::class, 'store']);
     Route::put('/vendors/{id}', [AdminVendorController::class, 'update']);
     Route::delete('/vendors/{id}', [AdminVendorController::class, 'destroy']);
+    Route::post('/vendors/bulk-delete', [AdminVendorController::class, 'bulkDestroy']);
 
     Route::get('/vendor-products', [AdminVendorProductController::class, 'index']);
     Route::post('/vendor-products', [AdminVendorProductController::class, 'store']);
@@ -487,6 +511,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::post('/expenses', [AdminExpenseController::class, 'store']);
     Route::put('/expenses/{id}', [AdminExpenseController::class, 'update']);
     Route::delete('/expenses/{id}', [AdminExpenseController::class, 'destroy']);
+    Route::post('/expenses/bulk-delete', [AdminExpenseController::class, 'bulkDestroy']);
     Route::get('/expense-categories', [AdminExpenseController::class, 'categories']);
     Route::post('/expense-categories', [AdminExpenseController::class, 'storeCategory']);
 
@@ -544,6 +569,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     Route::put('/banners/{id}', [AdminBannerController::class, 'update']);
     Route::patch('/banners/{id}/status', [AdminBannerController::class, 'toggleStatus']);
     Route::delete('/banners/{id}', [AdminBannerController::class, 'destroy']);
+    Route::post('/banners/bulk-delete', [AdminBannerController::class, 'bulkDestroy']);
 
     // Staff & Access Control (Super Admin / Admin)
     Route::get('/staff', [AdminStaffController::class, 'index']);
@@ -630,20 +656,25 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
         Route::put('/posts/{id}', [AdminBlogController::class, 'updatePost']);
         Route::patch('/posts/{id}/status', [AdminBlogController::class, 'togglePostStatus']);
         Route::delete('/posts/{id}', [AdminBlogController::class, 'destroyPost']);
+        Route::post('/posts/bulk-delete', [AdminBlogController::class, 'bulkDestroyPosts']);
 
         Route::get('/categories', [AdminBlogController::class, 'categories']);
         Route::post('/categories', [AdminBlogController::class, 'storeCategory']);
         Route::put('/categories/{id}', [AdminBlogController::class, 'updateCategory']);
         Route::delete('/categories/{id}', [AdminBlogController::class, 'destroyCategory']);
+        Route::post('/categories/bulk-delete', [AdminBlogController::class, 'bulkDestroyCategories']);
 
         Route::get('/tags', [AdminBlogController::class, 'tags']);
         Route::post('/tags', [AdminBlogController::class, 'storeTag']);
         Route::put('/tags/{id}', [AdminBlogController::class, 'updateTag']);
         Route::delete('/tags/{id}', [AdminBlogController::class, 'destroyTag']);
+        Route::post('/tags/bulk-delete', [AdminBlogController::class, 'bulkDestroyTags']);
 
         Route::get('/comments', [AdminBlogController::class, 'comments']);
         Route::patch('/comments/{id}/approval', [AdminBlogController::class, 'toggleCommentApproval']);
         Route::delete('/comments/{id}', [AdminBlogController::class, 'destroyComment']);
+        Route::post('/comments/bulk-delete', [AdminBlogController::class, 'bulkDestroyComments']);
+        Route::post('/comments/bulk-approve', [AdminBlogController::class, 'bulkApproveComments']);
     });
 
     // Online Store CMS & Content Architecture
@@ -654,6 +685,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
         Route::put('/pages/{id}', [AdminOnlineStoreController::class, 'updatePage']);
         Route::patch('/pages/{id}/status', [AdminOnlineStoreController::class, 'togglePageStatus']);
         Route::delete('/pages/{id}', [AdminOnlineStoreController::class, 'destroyPage']);
+        Route::post('/pages/bulk-delete', [AdminOnlineStoreController::class, 'bulkDestroyPages']);
 
         Route::get('/footer-columns', [AdminOnlineStoreController::class, 'footerColumns']);
         Route::post('/footer-columns', [AdminOnlineStoreController::class, 'storeFooterColumn']);

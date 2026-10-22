@@ -172,6 +172,35 @@ class AdminOnlineStoreController extends Controller
         ]);
     }
 
+    public function bulkDestroyPages(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'cms.manage');
+
+        $validated = $request->validate([
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:cms_pages,id',
+        ]);
+
+        $ids = $validated['ids'];
+        $count = count($ids);
+
+        CmsPage::whereIn('id', $ids)->delete();
+
+        AuditLog::log(
+            $request->user(),
+            'cms.pages_bulk_deleted',
+            'CmsPage',
+            null,
+            "Bulk deleted {$count} CMS pages"
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} page(s).",
+            'deleted_count' => $count,
+        ]);
+    }
+
+
     // ==========================================
     // 2. FOOTER COLUMNS & LINKS
     // ==========================================

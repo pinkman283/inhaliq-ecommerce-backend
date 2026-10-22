@@ -308,4 +308,33 @@ class AdminBannerController extends Controller
             'message' => 'Marketing banner deleted successfully.',
         ]);
     }
+
+    public function bulkDestroy(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'theme.manage');
+
+        $validated = $request->validate([
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:banners,id',
+        ]);
+
+        $ids = $validated['ids'];
+        $count = count($ids);
+
+        Banner::whereIn('id', $ids)->delete();
+
+        AuditLog::log(
+            $request->user(),
+            'banner.bulk_deleted',
+            'Banner',
+            null,
+            "Bulk deleted {$count} marketing banners"
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} banner(s).",
+            'deleted_count' => $count,
+        ]);
+    }
 }
+

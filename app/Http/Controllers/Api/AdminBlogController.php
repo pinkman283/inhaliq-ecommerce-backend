@@ -259,6 +259,38 @@ class AdminBlogController extends Controller
         ]);
     }
 
+    public function bulkDestroyPosts(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'cms.manage');
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'integer|exists:blog_posts,id',
+        ]);
+
+        $count = 0;
+        foreach ($validated['ids'] as $id) {
+            $post = BlogPost::find($id);
+            if ($post) {
+                $post->tags()->detach();
+                $post->comments()->delete();
+                $post->delete();
+                $count++;
+            }
+        }
+
+        AuditLog::log(
+            $request->user(),
+            'blog.posts_bulk_deleted',
+            'BlogPost',
+            null,
+            "Bulk deleted {$count} blog posts"
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} articles.",
+        ]);
+    }
+
     // ==========================================
     // BLOG CATEGORIES CRUD
     // ==========================================
@@ -342,6 +374,37 @@ class AdminBlogController extends Controller
         ]);
     }
 
+    public function bulkDestroyCategories(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'cms.manage');
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'integer|exists:blog_categories,id',
+        ]);
+
+        $count = 0;
+        foreach ($validated['ids'] as $id) {
+            $category = BlogCategory::find($id);
+            if ($category) {
+                $category->posts()->update(['category_id' => null]);
+                $category->delete();
+                $count++;
+            }
+        }
+
+        AuditLog::log(
+            $request->user(),
+            'blog.categories_bulk_deleted',
+            'BlogCategory',
+            null,
+            "Bulk deleted {$count} blog categories"
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} categories.",
+        ]);
+    }
+
     // ==========================================
     // BLOG TAGS CRUD
     // ==========================================
@@ -413,6 +476,37 @@ class AdminBlogController extends Controller
         ]);
     }
 
+    public function bulkDestroyTags(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'cms.manage');
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'integer|exists:blog_tags,id',
+        ]);
+
+        $count = 0;
+        foreach ($validated['ids'] as $id) {
+            $tag = BlogTag::find($id);
+            if ($tag) {
+                $tag->posts()->detach();
+                $tag->delete();
+                $count++;
+            }
+        }
+
+        AuditLog::log(
+            $request->user(),
+            'blog.tags_bulk_deleted',
+            'BlogTag',
+            null,
+            "Bulk deleted {$count} blog tags"
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} tags.",
+        ]);
+    }
+
     // ==========================================
     // BLOG COMMENTS MODERATION
     // ==========================================
@@ -464,6 +558,36 @@ class AdminBlogController extends Controller
 
         return response()->json([
             'message' => 'Comment deleted successfully.',
+        ]);
+    }
+
+    public function bulkDestroyComments(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'cms.manage');
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'integer|exists:blog_comments,id',
+        ]);
+
+        $count = BlogComment::whereIn('id', $validated['ids'])->delete();
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} comments.",
+        ]);
+    }
+
+    public function bulkApproveComments(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'cms.manage');
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'integer|exists:blog_comments,id',
+        ]);
+
+        $count = BlogComment::whereIn('id', $validated['ids'])->update(['is_approved' => true]);
+
+        return response()->json([
+            'message' => "Successfully approved {$count} comments.",
         ]);
     }
 }

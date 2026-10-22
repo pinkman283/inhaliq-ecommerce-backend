@@ -174,6 +174,35 @@ class AdminExpenseController extends Controller
         return response()->json(['message' => 'Expense deleted successfully.']);
     }
 
+    public function bulkDestroy(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'expenses.manage');
+
+        $validated = $request->validate([
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:expenses,id',
+        ]);
+
+        $ids = $validated['ids'];
+        $count = count($ids);
+
+        Expense::whereIn('id', $ids)->delete();
+
+        AuditLog::log(
+            $request->user(),
+            'expense.bulk_deleted',
+            'Expense',
+            null,
+            "Bulk deleted {$count} expense records."
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} expense record(s).",
+            'deleted_count' => $count,
+        ]);
+    }
+
+
     public function categories(Request $request): JsonResponse
     {
         $this->checkPermission($request, 'expenses.view');

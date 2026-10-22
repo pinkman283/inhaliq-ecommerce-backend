@@ -29,9 +29,7 @@ class ProductVariant extends Model
         'is_active',
     ];
 
-    protected $hidden = [
-        'cost_price',
-    ];
+    protected $hidden = [];
 
     protected function casts(): array
     {

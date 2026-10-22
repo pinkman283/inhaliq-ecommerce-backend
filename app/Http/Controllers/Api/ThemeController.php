@@ -125,6 +125,8 @@ class ThemeController extends Controller
                 'customer_auth_bg_image' => $get('customer_auth_bg_image', ''),
                 'customer_auth_bg_color' => $get('customer_auth_bg_color', '#ffffff'),
                 'customer_auth_card_position' => $get('customer_auth_card_position', 'left'),
+                'seo_meta' => is_string($get('seo_meta')) ? (json_decode($get('seo_meta'), true) ?: []) : ($get('seo_meta') ?: []),
+                'business_contact' => is_string($get('business_contact')) ? (json_decode($get('business_contact'), true) ?: []) : ($get('business_contact') ?: []),
             ];
         });
         return response()->json($themeSettings);

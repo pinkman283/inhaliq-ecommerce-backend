@@ -21,8 +21,7 @@ class CustomerNotificationService
 
         try {
             if ($email && filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                // Future mailable: Mail::to($email)->queue(new OrderConfirmationMail($order));
-                Log::info("Order confirmation email queued for {$email}");
+                MailService::sendOrderConfirmation($order);
             }
 
             if ($phone) {
@@ -48,6 +47,10 @@ class CustomerNotificationService
         Log::info("Dispatching Courier Tracking notification for Order #{$order->order_number} (Consignment: {$shipment->consignment_id}) to [{$email}]");
 
         try {
+            if ($email && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                MailService::sendOrderDispatched($order, $shipment);
+            }
+
             if ($phone) {
                 $trackingInfo = $shipment->tracking_code ? "Tracking code: {$shipment->tracking_code}." : "";
                 self::sendSms($phone, "Dear {$order->customer_name}, your parcel #{$order->order_number} is dispatched via {$shipment->provider}. {$trackingInfo} Please keep ৳{$shipment->cod_amount} ready for Cash on Delivery.");
@@ -65,12 +68,22 @@ class CustomerNotificationService
      */
     public static function sendOrderDelivered(Order $order): void
     {
+        $email = $order->customer_email;
         $phone = $order->customer_phone;
-        if ($phone) {
-            self::sendSms($phone, "Dear {$order->customer_name}, your order #{$order->order_number} has been delivered successfully. Thank you for shopping with us!");
-            
-            // WhatsApp Automated Delivery Success Notice
-            WhatsAppService::sendOrderDelivered($order);
+
+        try {
+            if ($email && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                MailService::sendOrderDelivered($order);
+            }
+
+            if ($phone) {
+                self::sendSms($phone, "Dear {$order->customer_name}, your order #{$order->order_number} has been delivered successfully. Thank you for shopping with us!");
+                
+                // WhatsApp Automated Delivery Success Notice
+                WhatsAppService::sendOrderDelivered($order);
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Failed to send order delivery notification: " . $e->getMessage());
         }
     }
 

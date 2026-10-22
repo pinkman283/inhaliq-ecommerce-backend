@@ -134,6 +134,32 @@ class AdminBlockedIpController extends Controller
         ]);
     }
 
+    public function bulkDestroy(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'security.ip_block');
+
+        $validated = $request->validate([
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:blocked_ips,id',
+            'reason' => 'nullable|string|max:255',
+        ]);
+
+        $blockedIps = BlockedIp::whereIn('id', $validated['ids'])->get();
+        $reason = $validated['reason'] ?? 'Bulk administrative unblock';
+
+        foreach ($blockedIps as $bIp) {
+            CustomerRiskService::unblockIp($bIp->ip_address, $request->user(), $reason);
+        }
+
+        $count = $blockedIps->count();
+
+        return response()->json([
+            'message' => "Successfully unblocked {$count} IP address(es).",
+            'unblocked_count' => $count,
+        ]);
+    }
+
+
     public function relatedEntities(Request $request, int $id): JsonResponse
     {
         $this->checkPermission($request, 'security.ip_block', 'customers.view');

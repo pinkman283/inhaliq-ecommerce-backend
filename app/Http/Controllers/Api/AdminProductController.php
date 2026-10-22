@@ -42,6 +42,10 @@ class AdminProductController extends Controller
             $query->where('subcategory_id', $request->input('subcategory_id'));
         }
 
+        if ($request->boolean('has_variants')) {
+            $query->has('variants');
+        }
+
         if ($request->filled('brand_id')) {
             $query->where('brand_id', $request->input('brand_id'));
         }
@@ -919,12 +923,14 @@ class AdminProductController extends Controller
         $validated = $request->validate([
             'product_ids' => 'required|array|min:1',
             'product_ids.*' => 'integer|exists:products,id',
-            'operation' => 'required|string|in:activate,deactivate,category,brand,price',
+            'operation' => 'required|string|in:activate,deactivate,category,brand,price,stock',
             'category_id' => 'required_if:operation,category|nullable|integer|exists:categories,id',
             'brand_id' => 'required_if:operation,brand|nullable|integer|exists:brands,id',
             'adjustment_type' => 'required_if:operation,price|nullable|string|in:percentage,fixed',
             'value' => 'required_if:operation,price|nullable|numeric',
             'rounding' => 'nullable|string|in:none,round,ceil,floor,round_99',
+            'stock_mode' => 'required_if:operation,stock|nullable|string|in:set,increase,decrease',
+            'stock_quantity' => 'required_if:operation,stock|nullable|integer',
         ]);
 
         $productIds = $validated['product_ids'];
@@ -980,6 +986,42 @@ class AdminProductController extends Controller
                     $details['brand_id'] = $brand->id;
                     $details['brand_name'] = $brand->name;
                     $message = "Successfully assigned " . count($affectedIds) . " product(s) to brand '{$brand->name}'.";
+                    break;
+
+                case 'stock':
+                    $stockMode = $validated['stock_mode'];
+                    $stockVal = (int) $validated['stock_quantity'];
+
+                    if ($stockMode === 'set' && $stockVal < 0) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'stock_quantity' => ["Stock quantity cannot be negative."],
+                        ]);
+                    }
+
+                    if (($stockMode === 'increase' || $stockMode === 'decrease') && $stockVal <= 0) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'stock_quantity' => ["Adjustment amount must be a positive integer."],
+                        ]);
+                    }
+
+                    foreach ($products as $product) {
+                        $currentStock = (int) $product->stock_quantity;
+                        $newStock = match ($stockMode) {
+                            'set' => $stockVal,
+                            'increase' => $currentStock + $stockVal,
+                            'decrease' => max(0, $currentStock - $stockVal),
+                        };
+
+                        $product->update([
+                            'stock_quantity' => $newStock,
+                            'stock_status' => $newStock > 0 ? 'in_stock' : 'out_of_stock',
+                        ]);
+                        $affectedIds[] = $product->id;
+                    }
+
+                    $details['stock_mode'] = $stockMode;
+                    $details['stock_quantity'] = $stockVal;
+                    $message = "Successfully updated inventory stock for " . count($affectedIds) . " product(s).";
                     break;
 
                 case 'price':
@@ -1756,6 +1798,222 @@ class AdminProductController extends Controller
                 'message' => 'An unexpected error occurred during import commit: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Download a standardized CSV sample template for product bulk import.
+     */
+    public function downloadTemplate(Request $request): \Symfony\Component\HttpFoundation\StreamedResponse
+    {
+        $this->checkPermission($request, 'products.view', 'products.manage');
+
+        $headers = [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+            'Content-Disposition' => 'attachment; filename="product_bulk_import_template.csv"',
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $sampleCategory = Category::first()?->name ?? 'Apparel';
+        $sampleBrand = Brand::first()?->name ?? 'INHALIQ';
+
+        $columns = [
+            'sku',
+            'name',
+            'description',
+            'short_description',
+            'category',
+            'brand',
+            'price',
+            'compare_at_price',
+            'cost_price',
+            'is_active',
+            'is_featured',
+            'is_new_arrival',
+            'is_best_seller',
+            'primary_image_url',
+            'additional_image_urls',
+        ];
+
+        $sampleRows = [
+            [
+                'TSHIRT-BLK-001',
+                'Classic Black Cotton T-Shirt',
+                'Premium 100% combed cotton crew-neck t-shirt with reinforced stitching.',
+                'Premium combed cotton tee',
+                $sampleCategory,
+                $sampleBrand,
+                '1250',
+                '1500',
+                '650',
+                'true',
+                'true',
+                'true',
+                'false',
+                'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=800',
+                '["https://images.unsplash.com/photo-1583743814966-8936f5b7be1a?w=800"]',
+            ],
+            [
+                'HOODIE-GRY-002',
+                'Oversized Fleece Hoodie',
+                'Heavyweight 380 GSM brushed fleece hoodie with kangaroo pocket and rib cuffs.',
+                'Heavyweight winter hoodie',
+                $sampleCategory,
+                $sampleBrand,
+                '2800',
+                '3200',
+                '1400',
+                'true',
+                'false',
+                'true',
+                'true',
+                'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?w=800',
+                '',
+            ],
+            [
+                'CAP-NVY-003',
+                'Embroidered Structured Cap',
+                '6-panel structured cotton twill cap with brass buckle adjustment.',
+                'Structured baseball cap',
+                $sampleCategory,
+                $sampleBrand,
+                '850',
+                '950',
+                '400',
+                'true',
+                'false',
+                'false',
+                'false',
+                '',
+                '',
+            ],
+        ];
+
+        return response()->stream(function () use ($columns, $sampleRows) {
+            $handle = fopen('php://output', 'w');
+            fprintf($handle, chr(0xEF) . chr(0xBB) . chr(0xBF));
+            fputcsv($handle, $columns);
+
+            foreach ($sampleRows as $row) {
+                fputcsv($handle, $row);
+            }
+            fclose($handle);
+        }, 200, $headers);
+    }
+
+    /**
+     * Bulk Quick Save: Spreadsheet-style multi-product & variant inline update.
+     */
+    public function bulkQuickSave(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'products.manage');
+
+        $validated = $request->validate([
+            'products' => 'nullable|array',
+            'products.*.id' => 'required|integer|exists:products,id',
+            'products.*.cost_price' => 'nullable|numeric|min:0',
+            'products.*.compare_at_price' => 'nullable|numeric|min:0',
+            'products.*.price' => 'nullable|numeric|min:0',
+            'products.*.stock_quantity' => 'nullable|integer|min:0',
+            'products.*.is_featured' => 'nullable|boolean',
+            'products.*.is_best_seller' => 'nullable|boolean',
+            'products.*.is_active' => 'nullable|boolean',
+            'variants' => 'nullable|array',
+            'variants.*.id' => 'required|integer|exists:product_variants,id',
+            'variants.*.cost_price' => 'nullable|numeric|min:0',
+            'variants.*.price' => 'nullable|numeric|min:0',
+            'variants.*.stock_quantity' => 'nullable|integer|min:0',
+            'variants.*.is_active' => 'nullable|boolean',
+        ]);
+
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($validated, $request) {
+            $updatedProductCount = 0;
+            $updatedVariantCount = 0;
+
+            if (!empty($validated['products'])) {
+                foreach ($validated['products'] as $item) {
+                    $product = Product::find($item['id']);
+                    if (!$product) continue;
+
+                    $updates = [];
+                    if (array_key_exists('cost_price', $item)) {
+                        $updates['cost_price'] = $item['cost_price'] !== null ? round((float)$item['cost_price'], 2) : null;
+                    }
+                    if (array_key_exists('compare_at_price', $item)) {
+                        $updates['compare_at_price'] = $item['compare_at_price'] !== null ? round((float)$item['compare_at_price'], 2) : null;
+                    }
+                    if (array_key_exists('price', $item) && $item['price'] !== null) {
+                        $updates['price'] = round((float)$item['price'], 2);
+                    }
+                    if (array_key_exists('stock_quantity', $item) && $item['stock_quantity'] !== null) {
+                        $newStock = (int)$item['stock_quantity'];
+                        $updates['stock_quantity'] = $newStock;
+                        $updates['stock_status'] = $newStock > 0 ? 'in_stock' : 'out_of_stock';
+                    }
+                    if (array_key_exists('is_featured', $item)) {
+                        $updates['is_featured'] = (bool)$item['is_featured'];
+                    }
+                    if (array_key_exists('is_best_seller', $item)) {
+                        $updates['is_best_seller'] = (bool)$item['is_best_seller'];
+                    }
+                    if (array_key_exists('is_active', $item)) {
+                        $updates['is_active'] = (bool)$item['is_active'];
+                    }
+
+                    if (!empty($updates)) {
+                        $product->update($updates);
+                        $updatedProductCount++;
+                    }
+                }
+            }
+
+            if (!empty($validated['variants'])) {
+                foreach ($validated['variants'] as $vItem) {
+                    $variant = ProductVariant::find($vItem['id']);
+                    if (!$variant) continue;
+
+                    $vUpdates = [];
+                    if (array_key_exists('cost_price', $vItem)) {
+                        $vUpdates['cost_price'] = $vItem['cost_price'] !== null ? round((float)$vItem['cost_price'], 2) : null;
+                    }
+                    if (array_key_exists('price', $vItem) && $vItem['price'] !== null) {
+                        $vUpdates['price'] = round((float)$vItem['price'], 2);
+                    }
+                    if (array_key_exists('stock_quantity', $vItem) && $vItem['stock_quantity'] !== null) {
+                        $vUpdates['stock_quantity'] = (int)$vItem['stock_quantity'];
+                    }
+                    if (array_key_exists('is_active', $vItem)) {
+                        $vUpdates['is_active'] = (bool)$vItem['is_active'];
+                    }
+
+                    if (!empty($vUpdates)) {
+                        $variant->update($vUpdates);
+                        $updatedVariantCount++;
+                    }
+                }
+            }
+
+            AuditLog::log(
+                $request->user(),
+                'product.bulk_quick_edited',
+                'Product',
+                null,
+                "Bulk quick-edited {$updatedProductCount} product(s) and {$updatedVariantCount} variant(s)",
+                null,
+                [
+                    'products_updated' => $updatedProductCount,
+                    'variants_updated' => $updatedVariantCount,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => "Successfully saved changes for {$updatedProductCount} product(s)" . ($updatedVariantCount > 0 ? " and {$updatedVariantCount} variant(s)" : "") . ".",
+                'products_updated' => $updatedProductCount,
+                'variants_updated' => $updatedVariantCount,
+            ]);
+        });
     }
 }
 

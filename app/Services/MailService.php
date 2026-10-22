@@ -7,6 +7,11 @@ use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Mail;
 use App\Mail\OtpMail;
 use App\Mail\AdminInvitationMail;
+use App\Mail\OrderConfirmationMail;
+use App\Mail\OrderDispatchedMail;
+use App\Mail\OrderDeliveredMail;
+use App\Models\Order;
+use App\Models\Shipment;
 use Illuminate\Support\Facades\Log;
 
 class MailService
@@ -109,4 +114,74 @@ class MailService
             Log::error("Failed to send Admin Invitation to {$email}: " . $e->getMessage());
         }
     }
+
+    /**
+     * Send order confirmation email to customer.
+     */
+    public static function sendOrderConfirmation(Order $order): void
+    {
+        if (empty($order->customer_email) || !filter_var($order->customer_email, FILTER_VALIDATE_EMAIL)) {
+            return;
+        }
+
+        self::configureTransport();
+        $sender = self::getSender('order_confirmed');
+        
+        Config::set('mail.from.address', $sender['address']);
+        Config::set('mail.from.name', $sender['name']);
+        
+        try {
+            Mail::to($order->customer_email)->send(new OrderConfirmationMail($order));
+            Log::info("Order confirmation email sent to {$order->customer_email} for Order #{$order->order_number}");
+        } catch (\Throwable $e) {
+            Log::error("Failed to send order confirmation email to {$order->customer_email}: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Send shipment tracking email to customer.
+     */
+    public static function sendOrderDispatched(Order $order, Shipment $shipment): void
+    {
+        if (empty($order->customer_email) || !filter_var($order->customer_email, FILTER_VALIDATE_EMAIL)) {
+            return;
+        }
+
+        self::configureTransport();
+        $sender = self::getSender('order_shipped');
+        
+        Config::set('mail.from.address', $sender['address']);
+        Config::set('mail.from.name', $sender['name']);
+        
+        try {
+            Mail::to($order->customer_email)->send(new OrderDispatchedMail($order, $shipment));
+            Log::info("Shipment dispatched email sent to {$order->customer_email} for Order #{$order->order_number}");
+        } catch (\Throwable $e) {
+            Log::error("Failed to send dispatch email to {$order->customer_email}: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Send delivery confirmation email to customer.
+     */
+    public static function sendOrderDelivered(Order $order): void
+    {
+        if (empty($order->customer_email) || !filter_var($order->customer_email, FILTER_VALIDATE_EMAIL)) {
+            return;
+        }
+
+        self::configureTransport();
+        $sender = self::getSender('order_delivered');
+        
+        Config::set('mail.from.address', $sender['address']);
+        Config::set('mail.from.name', $sender['name']);
+        
+        try {
+            Mail::to($order->customer_email)->send(new OrderDeliveredMail($order));
+            Log::info("Order delivered email sent to {$order->customer_email} for Order #{$order->order_number}");
+        } catch (\Throwable $e) {
+            Log::error("Failed to send delivery email to {$order->customer_email}: " . $e->getMessage());
+        }
+    }
 }
+

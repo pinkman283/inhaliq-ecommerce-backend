@@ -29,6 +29,45 @@ class AuthController extends Controller
             'phone' => 'nullable|string|max:30',
         ]);
 
+        // 1. Check if OTP Shield is disabled in store settings
+        if (!\App\Models\Setting::isOtpShieldEnabled()) {
+            $user = User::create([
+                'name' => $validated['name'],
+                'email' => $validated['email'],
+                'password' => Hash::make($validated['password']),
+                'role' => 'customer',
+                'phone' => $validated['phone'] ?? null,
+                'avatar' => 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80',
+            ]);
+
+            $token = $user->createToken('auth_token', ['customer:access'])->plainTextToken;
+
+            return response()->json([
+                'message' => 'Account registered successfully.',
+                'otp_required' => false,
+                'token' => $token,
+                'user' => [
+                    'id' => $user->id,
+                    'name' => $user->name,
+                    'email' => $user->email,
+                    'role' => $user->role,
+                    'phone' => $user->phone,
+                    'avatar' => $user->avatar,
+                ],
+            ], 201);
+        }
+
+        // 2. Enforce 60-second cooldown between OTP requests
+        $existing = PendingRegistration::where('email', $validated['email'])->first();
+        if ($existing && $existing->updated_at && $existing->updated_at->addSeconds(60)->isFuture()) {
+            $secondsLeft = now()->diffInSeconds($existing->updated_at->addSeconds(60), false);
+            if ($secondsLeft > 0) {
+                throw ValidationException::withMessages([
+                    'email' => ["Please wait {$secondsLeft} second(s) before requesting another verification code."],
+                ]);
+            }
+        }
+
         $otp = (string) random_int(100000, 999999);
         $otpHash = Hash::make($otp);
 
@@ -48,6 +87,8 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'OTP sent to your email address.',
+            'otp_required' => true,
+            'cooldown_seconds' => 60,
         ]);
     }
 
@@ -208,11 +249,26 @@ class AuthController extends Controller
 
         $user = User::where('email', $validated['email'])->first();
 
-        // Always return generic response
+        // Always return generic response to prevent email harvesting
         if (!$user) {
             return response()->json([
                 'message' => 'If an account exists, a password reset email has been sent.',
+                'cooldown_seconds' => 60,
             ]);
+        }
+
+        // Enforce 60-second cooldown between reset OTP requests
+        $existingOtp = EmailOtp::where('email', $validated['email'])
+            ->where('purpose', 'forgot_password')
+            ->first();
+
+        if ($existingOtp && $existingOtp->updated_at && $existingOtp->updated_at->addSeconds(60)->isFuture()) {
+            $secondsLeft = now()->diffInSeconds($existingOtp->updated_at->addSeconds(60), false);
+            if ($secondsLeft > 0) {
+                throw ValidationException::withMessages([
+                    'email' => ["Please wait {$secondsLeft} second(s) before requesting another reset code."],
+                ]);
+            }
         }
 
         $otp = (string) random_int(100000, 999999);
@@ -231,6 +287,7 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'If an account exists, a password reset email has been sent.',
+            'cooldown_seconds' => 60,
         ]);
     }
 

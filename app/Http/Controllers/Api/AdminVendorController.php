@@ -171,4 +171,33 @@ class AdminVendorController extends Controller
 
         return response()->json(['message' => 'Vendor deleted successfully']);
     }
+
+    public function bulkDestroy(Request $request): JsonResponse
+    {
+        $this->checkPermission($request, 'vendors.manage');
+
+        $validated = $request->validate([
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:vendors,id',
+        ]);
+
+        $ids = $validated['ids'];
+        $count = count($ids);
+
+        Vendor::whereIn('id', $ids)->delete();
+
+        AuditLog::log(
+            $request->user(),
+            'vendor.bulk_deleted',
+            'Vendor',
+            null,
+            "Bulk deleted {$count} vendor profiles."
+        );
+
+        return response()->json([
+            'message' => "Successfully deleted {$count} vendor(s).",
+            'deleted_count' => $count,
+        ]);
+    }
 }
+

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\BlogPost;
+use App\Models\Brand;
 use App\Models\Category;
 use App\Models\CmsPage;
 use App\Models\Integration;
@@ -282,23 +283,30 @@ class AdminSettingsController extends Controller
     {
         $this->checkPermission($request, 'settings.manage');
 
-        $baseUrl = config('app.url', 'https://aether-audio.com');
+        $seoSetting = Setting::where('key', 'seo_meta')->first();
+        $seoMeta = $seoSetting && is_array($seoSetting->value) ? $seoSetting->value : [];
+        $baseUrl = !empty($seoMeta['canonical_base_url']) ? rtrim($seoMeta['canonical_base_url'], '/') : config('app.url', 'https://inhaliq.com');
         $urls = [];
 
         // Static routes
         $urls[] = ['loc' => $baseUrl . '/', 'priority' => '1.0', 'changefreq' => 'daily'];
-        $urls[] = ['loc' => $baseUrl . '/shop', 'priority' => '0.9', 'changefreq' => 'daily'];
-        $urls[] = ['loc' => $baseUrl . '/blog', 'priority' => '0.8', 'changefreq' => 'daily'];
+        $urls[] = ['loc' => $baseUrl . '/products', 'priority' => '0.9', 'changefreq' => 'daily'];
+        $urls[] = ['loc' => $baseUrl . '/brands', 'priority' => '0.8', 'changefreq' => 'weekly'];
+        $urls[] = ['loc' => $baseUrl . '/promotions', 'priority' => '0.8', 'changefreq' => 'weekly'];
+        $urls[] = ['loc' => $baseUrl . '/blog', 'priority' => '0.7', 'changefreq' => 'weekly'];
+        $urls[] = ['loc' => $baseUrl . '/about', 'priority' => '0.6', 'changefreq' => 'monthly'];
+        $urls[] = ['loc' => $baseUrl . '/contact', 'priority' => '0.6', 'changefreq' => 'monthly'];
+        $urls[] = ['loc' => $baseUrl . '/faq', 'priority' => '0.6', 'changefreq' => 'monthly'];
 
         // Products
-        $products = Product::select('id', 'slug', 'updated_at')->take(500)->get();
+        $products = Product::select('id', 'slug', 'updated_at')->where('is_active', true)->take(500)->get();
         foreach ($products as $p) {
             $slug = $p->slug ?? "product-{$p->id}";
             $urls[] = [
                 'loc' => $baseUrl . '/products/' . $slug,
                 'lastmod' => $p->updated_at ? $p->updated_at->toAtomString() : now()->toAtomString(),
-                'priority' => '0.8',
-                'changefreq' => 'weekly',
+                'priority' => '0.9',
+                'changefreq' => 'daily',
             ];
         }
 
@@ -308,6 +316,17 @@ class AdminSettingsController extends Controller
             $urls[] = [
                 'loc' => $baseUrl . '/category/' . $c->slug,
                 'lastmod' => $c->updated_at ? $c->updated_at->toAtomString() : now()->toAtomString(),
+                'priority' => '0.8',
+                'changefreq' => 'weekly',
+            ];
+        }
+
+        // Brands
+        $brands = Brand::select('id', 'slug', 'updated_at')->get();
+        foreach ($brands as $b) {
+            $urls[] = [
+                'loc' => $baseUrl . '/brand/' . $b->slug,
+                'lastmod' => $b->updated_at ? $b->updated_at->toAtomString() : now()->toAtomString(),
                 'priority' => '0.7',
                 'changefreq' => 'weekly',
             ];
@@ -319,8 +338,8 @@ class AdminSettingsController extends Controller
             $urls[] = [
                 'loc' => $baseUrl . '/blog/' . $post->slug,
                 'lastmod' => $post->updated_at ? $post->updated_at->toAtomString() : now()->toAtomString(),
-                'priority' => '0.6',
-                'changefreq' => 'monthly',
+                'priority' => '0.7',
+                'changefreq' => 'weekly',
             ];
         }
 
@@ -338,7 +357,15 @@ class AdminSettingsController extends Controller
         return response()->json([
             'success' => true,
             'total_urls' => count($urls),
-            'sitemap_url' => url('/sitemap.xml'),
+            'sitemap_url' => $baseUrl . '/sitemap.xml',
+            'counts' => [
+                'products' => $products->count(),
+                'categories' => $categories->count(),
+                'brands' => $brands->count(),
+                'posts' => $posts->count(),
+                'pages' => $pages->count(),
+                'static' => 8,
+            ],
             'generated_at' => now()->toIso8601String(),
             'entries_sample' => array_slice($urls, 0, 15),
         ]);
@@ -349,7 +376,10 @@ class AdminSettingsController extends Controller
      */
     public function sitemapXml(): Response
     {
-        $baseUrl = config('app.url', 'https://aether-audio.com');
+        $seoSetting = Setting::where('key', 'seo_meta')->first();
+        $seoMeta = $seoSetting && is_array($seoSetting->value) ? $seoSetting->value : [];
+        $baseUrl = !empty($seoMeta['canonical_base_url']) ? rtrim($seoMeta['canonical_base_url'], '/') : config('app.url', 'https://inhaliq.com');
+
         $xml = '<?xml version="1.0" encoding="UTF-8"?>';
         $xml .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
 
@@ -364,23 +394,33 @@ class AdminSettingsController extends Controller
         };
 
         $addUrl($baseUrl . '/', date('Y-m-d'), 'daily', '1.0');
-        $addUrl($baseUrl . '/shop', date('Y-m-d'), 'daily', '0.9');
-        $addUrl($baseUrl . '/blog', date('Y-m-d'), 'daily', '0.8');
+        $addUrl($baseUrl . '/products', date('Y-m-d'), 'daily', '0.9');
+        $addUrl($baseUrl . '/brands', date('Y-m-d'), 'weekly', '0.8');
+        $addUrl($baseUrl . '/promotions', date('Y-m-d'), 'weekly', '0.8');
+        $addUrl($baseUrl . '/blog', date('Y-m-d'), 'weekly', '0.7');
+        $addUrl($baseUrl . '/about', date('Y-m-d'), 'monthly', '0.6');
+        $addUrl($baseUrl . '/contact', date('Y-m-d'), 'monthly', '0.6');
+        $addUrl($baseUrl . '/faq', date('Y-m-d'), 'monthly', '0.6');
 
-        $products = Product::select('id', 'slug', 'updated_at')->take(500)->get();
+        $products = Product::select('id', 'slug', 'updated_at')->where('is_active', true)->take(500)->get();
         foreach ($products as $p) {
             $slug = $p->slug ?? "product-{$p->id}";
-            $addUrl($baseUrl . '/products/' . $slug, $p->updated_at ? $p->updated_at->format('Y-m-d') : null, 'weekly', '0.8');
+            $addUrl($baseUrl . '/products/' . $slug, $p->updated_at ? $p->updated_at->format('Y-m-d') : null, 'daily', '0.9');
         }
 
         $categories = Category::select('id', 'slug', 'updated_at')->get();
         foreach ($categories as $c) {
-            $addUrl($baseUrl . '/category/' . $c->slug, $c->updated_at ? $c->updated_at->format('Y-m-d') : null, 'weekly', '0.7');
+            $addUrl($baseUrl . '/category/' . $c->slug, $c->updated_at ? $c->updated_at->format('Y-m-d') : null, 'weekly', '0.8');
+        }
+
+        $brands = Brand::select('id', 'slug', 'updated_at')->get();
+        foreach ($brands as $b) {
+            $addUrl($baseUrl . '/brand/' . $b->slug, $b->updated_at ? $b->updated_at->format('Y-m-d') : null, 'weekly', '0.7');
         }
 
         $posts = BlogPost::select('id', 'slug', 'updated_at')->where('status', 'published')->get();
         foreach ($posts as $post) {
-            $addUrl($baseUrl . '/blog/' . $post->slug, $post->updated_at ? $post->updated_at->format('Y-m-d') : null, 'monthly', '0.6');
+            $addUrl($baseUrl . '/blog/' . $post->slug, $post->updated_at ? $post->updated_at->format('Y-m-d') : null, 'weekly', '0.7');
         }
 
         $pages = CmsPage::select('id', 'slug', 'updated_at')->where('is_active', true)->get();

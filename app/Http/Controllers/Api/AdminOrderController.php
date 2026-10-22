@@ -1172,74 +1172,147 @@ class AdminOrderController extends Controller
         $this->checkPermission($request, 'orders.manage');
 
         $validated = $request->validate([
-            'order_ids' => 'required|array|min:1',
+            'order_ids' => 'required_without:orders|array|min:1',
             'order_ids.*' => 'integer|exists:orders,id',
+            'orders' => 'nullable|array|min:1',
+            'orders.*.id' => 'required_with:orders|integer|exists:orders,id',
+            'orders.*.recipient_city_id' => 'nullable|integer',
+            'orders.*.recipient_zone_id' => 'nullable|integer',
+            'orders.*.recipient_area_id' => 'nullable|integer',
+            'orders.*.recipient_address' => 'nullable|string',
+            'orders.*.recipient_phone' => 'nullable|string',
+            'orders.*.cod_amount' => 'nullable|numeric|min:0',
+            'orders.*.weight' => 'nullable|numeric|min:0.05',
+            'orders.*.notes' => 'nullable|string|max:500',
             'provider' => 'nullable|string|in:steadfast,pathao,redx',
+            'pickup_store_id' => 'nullable|string',
         ]);
 
         $provider = $validated['provider'] ?? 'steadfast';
-        $orders = Order::with(['latestShipment', 'items'])->whereIn('id', $validated['order_ids'])->get();
+        $pickupStoreId = $validated['pickup_store_id'] ?? null;
+
+        // Build target order IDs and per-order parameter overrides
+        $targetIds = [];
+        $overridesByOrderId = [];
+
+        if (!empty($validated['orders'])) {
+            foreach ($validated['orders'] as $item) {
+                $oId = (int) $item['id'];
+                $targetIds[] = $oId;
+                $overridesByOrderId[$oId] = $item;
+            }
+        } elseif (!empty($validated['order_ids'])) {
+            $targetIds = array_map('intval', $validated['order_ids']);
+        }
+
+        $orders = Order::with(['latestShipment', 'items.product', 'shipments'])->whereIn('id', $targetIds)->get();
 
         $courierManager = app(\App\Services\Courier\CourierManager::class);
         $successCount = 0;
         $failedCount = 0;
         $messages = [];
+        $results = [];
 
         foreach ($orders as $order) {
+            // Check terminal statuses
             if ($order->order_status === 'cancelled' || $order->order_status === 'delivered') {
                 $failedCount++;
-                $messages[] = "Order #{$order->order_number} skipped (Status: {$order->order_status})";
+                $msg = "Order #{$order->order_number} skipped (Status: {$order->order_status})";
+                $messages[] = $msg;
+                $results[] = [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'success' => false,
+                    'message' => $msg,
+                ];
+                continue;
+            }
+
+            // Check if active shipment exists
+            $existingActive = $order->shipments
+                ->whereNotIn('status', ['cancelled', 'delivery_failed'])
+                ->first();
+
+            if ($existingActive) {
+                $failedCount++;
+                $msg = "Order #{$order->order_number} already has active consignment (#{$existingActive->consignment_id}) with {$existingActive->provider}.";
+                $messages[] = $msg;
+                $results[] = [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'success' => false,
+                    'message' => $msg,
+                    'consignment_id' => $existingActive->consignment_id,
+                    'tracking_code' => $existingActive->tracking_code,
+                ];
                 continue;
             }
 
             try {
-                $shipAddress = $order->shipping_address ?? [];
-                $addressStr = is_array($shipAddress) ? ($shipAddress['address_line1'] ?? $shipAddress['address'] ?? 'Dhaka') : 'Dhaka';
+                $orderOverrides = $overridesByOrderId[$order->id] ?? [];
+                $orderOverrides['provider'] = $provider;
 
-                $bookingPayload = [
-                    'recipient_name' => $order->customer_name,
-                    'recipient_phone' => $order->customer_phone,
-                    'recipient_address' => $addressStr,
-                    'cod_amount' => $order->payment_status === 'paid' ? 0 : (float) $order->total_amount,
-                    'note' => "Bulk dispatch for Order #{$order->order_number}",
-                    'weight' => 0.5,
-                ];
-
-                $res = $courierManager->driver($provider)->createShipment($bookingPayload);
-
-                if (!empty($res['success'])) {
-                    $shipment = Shipment::create([
-                        'order_id' => $order->id,
-                        'provider' => $provider,
-                        'consignment_id' => $res['consignment_id'] ?? null,
-                        'tracking_code' => $res['tracking_code'] ?? ($res['consignment_id'] ?? null),
-                        'tracking_url' => $res['tracking_url'] ?? null,
-                        'status' => 'in_transit',
-                        'recipient_name' => $order->customer_name,
-                        'recipient_phone' => $order->customer_phone,
-                        'recipient_address' => $addressStr,
-                        'cod_amount' => $bookingPayload['cod_amount'],
-                        'weight' => 0.5,
-                    ]);
-
-                    $order->update([
-                        'order_status' => 'shipped',
-                        'carrier' => ucfirst($provider),
-                        'tracking_code' => $shipment->tracking_code,
-                        'shipped_at' => now(),
-                    ]);
-
-                    // Send dispatch WhatsApp notification if enabled
-                    \App\Services\CustomerNotificationService::orderDispatched($order, $shipment);
-
-                    $successCount++;
-                } else {
-                    $failedCount++;
-                    $messages[] = "Order #{$order->order_number}: " . ($res['message'] ?? 'Courier rejected booking');
+                if (!empty($pickupStoreId)) {
+                    $orderOverrides['pickup_store_id'] = $pickupStoreId;
                 }
+
+                // Pathao requires city & zone
+                if ($provider === 'pathao') {
+                    $cityId = $orderOverrides['recipient_city_id'] ?? $order->shipping_city_id;
+                    $zoneId = $orderOverrides['recipient_zone_id'] ?? $order->shipping_zone_id;
+
+                    if (empty($cityId) || empty($zoneId)) {
+                        $failedCount++;
+                        $msg = "Order #{$order->order_number}: Pathao requires explicitly selected City and Zone.";
+                        $messages[] = $msg;
+                        $results[] = [
+                            'order_id' => $order->id,
+                            'order_number' => $order->order_number,
+                            'success' => false,
+                            'message' => $msg,
+                        ];
+                        continue;
+                    }
+
+                    $orderOverrides['recipient_city_id'] = (int) $cityId;
+                    $orderOverrides['recipient_zone_id'] = (int) $zoneId;
+                    if (!empty($orderOverrides['recipient_area_id']) || !empty($order->shipping_area_id)) {
+                        $orderOverrides['recipient_area_id'] = (int) ($orderOverrides['recipient_area_id'] ?? $order->shipping_area_id);
+                    }
+                }
+
+                // Execute booking via standard atomic pipeline
+                $shipment = $courierManager->bookShipment($order, $orderOverrides);
+
+                // Dispatch WhatsApp notification if enabled
+                try {
+                    \App\Services\CustomerNotificationService::orderDispatched($order, $shipment);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("WhatsApp dispatch notice failed for Order #{$order->order_number}: " . $e->getMessage());
+                }
+
+                $successCount++;
+                $results[] = [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'success' => true,
+                    'consignment_id' => $shipment->consignment_id,
+                    'tracking_code' => $shipment->tracking_code,
+                    'tracking_url' => $shipment->tracking_url,
+                    'provider' => $shipment->provider,
+                    'status' => $shipment->status,
+                    'cod_amount' => $shipment->cod_amount,
+                ];
             } catch (\Throwable $e) {
                 $failedCount++;
-                $messages[] = "Order #{$order->order_number} failed: " . $e->getMessage();
+                $errorMsg = "Order #{$order->order_number} failed: " . $e->getMessage();
+                $messages[] = $errorMsg;
+                $results[] = [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                ];
             }
         }
 
@@ -1248,13 +1321,22 @@ class AdminOrderController extends Controller
             'courier.bulk_booked',
             'Order',
             null,
-            "Bulk booked {$successCount} orders with {$provider}."
+            "Bulk booked {$successCount} orders with {$provider}.",
+            null,
+            [
+                'provider' => $provider,
+                'success_count' => $successCount,
+                'failed_count' => $failedCount,
+                'orders_processed' => count($targetIds),
+            ]
         );
 
         return response()->json([
+            'success' => $successCount > 0,
             'message' => "Bulk courier booking finished. {$successCount} succeeded, {$failedCount} failed.",
             'success_count' => $successCount,
             'failed_count' => $failedCount,
+            'results' => $results,
             'details' => $messages,
         ]);
     }

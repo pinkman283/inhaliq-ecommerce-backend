@@ -46,6 +46,15 @@ class Setting extends Model
         return filter_var($setting->value, FILTER_VALIDATE_BOOLEAN);
     }
 
+    public static function isOtpShieldEnabled(): bool
+    {
+        $setting = self::where('key', 'otp_shield_enabled')->first();
+        if (!$setting) {
+            return true;
+        }
+        return filter_var($setting->value, FILTER_VALIDATE_BOOLEAN);
+    }
+
     public static function getVatRate(): float
     {
         if (!self::isVatEnabled()) {
