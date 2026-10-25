@@ -12,6 +12,7 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\CsvSanitizer;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AdminFinanceController extends Controller
@@ -341,7 +342,7 @@ class AdminFinanceController extends Controller
                 fputcsv($handle, ['Order Number', 'Date', 'Source', 'Customer', 'Subtotal', 'Tax', 'Discount', 'Total', 'COGS', 'Gross Profit', 'Status']);
                 $orders = Order::whereBetween('created_at', [$startDate, $endDate])->get();
                 foreach ($orders as $o) {
-                    fputcsv($handle, [
+                    fputcsv($handle, CsvSanitizer::sanitizeRow([
                         $o->order_number,
                         $o->created_at->format('Y-m-d H:i:s'),
                         strtoupper($o->order_source),
@@ -353,7 +354,7 @@ class AdminFinanceController extends Controller
                         number_format($o->cogs_amount, 2),
                         number_format($o->gross_profit, 2),
                         $o->order_status,
-                    ]);
+                    ]));
                 }
             }
 

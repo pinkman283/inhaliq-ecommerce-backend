@@ -360,6 +360,11 @@ class OrderReturnService
     public function processRefund(OrderReturn $return, array $data, ?User $actor = null): OrderReturn
     {
         return DB::transaction(function () use ($return, $data, $actor) {
+            $lockedReturn = OrderReturn::where('id', $return->id)->lockForUpdate()->firstOrFail();
+            if (in_array($lockedReturn->refund_status, ['processed', 'store_credit_issued'])) {
+                throw new \InvalidArgumentException("Return #{$lockedReturn->return_number} has already been refunded.");
+            }
+
             $refundAmount = round((float) ($data['refund_amount'] ?? $return->refund_amount), 2);
             $refundMethod = $data['refund_method'] ?? ($return->refund_method !== 'none' ? $return->refund_method : 'cash');
             $notes = $data['notes'] ?? $return->notes;

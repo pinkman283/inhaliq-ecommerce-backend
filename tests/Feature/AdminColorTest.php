@@ -299,8 +299,8 @@ class AdminColorTest extends TestCase
         $this->assertEquals(5.00, $reconciledVar1->price_modifier);
         $this->assertEquals('KB-LIN-1', $reconciledVar1->sku, 'Original variant SKU must be preserved');
 
-        // Verify var2 was deleted
-        $this->assertDatabaseMissing('product_variants', ['id' => $originalVar2Id]);
+        // Verify var2 was safely deactivated to preserve historical order references
+        $this->assertDatabaseHas('product_variants', ['id' => $originalVar2Id, 'is_active' => false]);
 
         // Verify new variant was created with a new ID
         $newVariant = ProductVariant::where('product_id', $product->id)

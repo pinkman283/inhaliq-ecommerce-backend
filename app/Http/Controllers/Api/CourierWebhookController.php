@@ -124,6 +124,12 @@ class CourierWebhookController extends Controller
             $oldStatus = $shipment->status;
             $newStatus = $event->normalizedStatus;
 
+            // State Machine Guard: Prevent out-of-order webhooks from reverting terminal shipment states
+            if (in_array($oldStatus, ['delivered', 'returned', 'cancelled']) && in_array($newStatus, ['booked', 'pickup_pending', 'picked_up', 'in_transit', 'out_for_delivery'])) {
+                Log::info("Ignoring out-of-order courier webhook [{$provider}]: Shipment #{$shipment->id} is already in terminal state '{$oldStatus}', ignoring '{$newStatus}' transition.");
+                return;
+            }
+
             $updates = [
                 'status' => $newStatus,
                 'courier_status_raw' => $event->courierRawStatus ?: $shipment->courier_status_raw,

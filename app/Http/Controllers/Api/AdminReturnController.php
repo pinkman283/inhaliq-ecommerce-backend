@@ -26,6 +26,8 @@ class AdminReturnController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        $this->checkPermission($request, 'returns.view', 'returns.manage');
+
         $query = OrderReturn::with([
             'order:id,order_number,total_amount,payment_status,order_status,payment_method',
             'customer:id,name,phone,email',
@@ -119,8 +121,10 @@ class AdminReturnController extends Controller
     /**
      * Show detailed return record.
      */
-    public function show(string $id): JsonResponse
+    public function show(Request $request, string $id): JsonResponse
     {
+        $this->checkPermission($request, 'returns.view', 'returns.manage');
+
         $query = OrderReturn::with([
             'order.items.product',
             'order.latestShipment',
@@ -164,6 +168,8 @@ class AdminReturnController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        $this->checkPermission($request, 'returns.manage');
+
         $validator = Validator::make($request->all(), [
             'order_id' => 'required|exists:orders,id',
             'return_type' => 'required|in:rto,customer_return,failed_delivery,partial_rejection',
@@ -212,6 +218,8 @@ class AdminReturnController extends Controller
      */
     public function receive(Request $request, int $id): JsonResponse
     {
+        $this->checkPermission($request, 'returns.manage');
+
         $orderReturn = OrderReturn::findOrFail($id);
 
         $orderReturn = $this->returnService->receiveReturn($orderReturn, $request->all(), $request->user());
@@ -238,6 +246,8 @@ class AdminReturnController extends Controller
      */
     public function qc(Request $request, int $id): JsonResponse
     {
+        $this->checkPermission($request, 'returns.manage');
+
         $orderReturn = OrderReturn::findOrFail($id);
 
         $validator = Validator::make($request->all(), [
@@ -283,7 +293,16 @@ class AdminReturnController extends Controller
      */
     public function refund(Request $request, int $id): JsonResponse
     {
-        $orderReturn = OrderReturn::findOrFail($id);
+        $this->checkPermission($request, 'returns.manage', 'finance.manage');
+
+        $orderReturn = OrderReturn::with('order')->findOrFail($id);
+
+        if (in_array($orderReturn->refund_status, ['processed', 'store_credit_issued'])) {
+            return response()->json([
+                'status' => 'error',
+                'message' => "Return #{$orderReturn->return_number} has already been refunded.",
+            ], 422);
+        }
 
         $validator = Validator::make($request->all(), [
             'refund_amount' => 'required|numeric|min:0',
@@ -298,10 +317,21 @@ class AdminReturnController extends Controller
             ], 422);
         }
 
+        $order = $orderReturn->order;
+        $remainingRefundable = max(0.00, round((float) $order->total_amount - (float) ($order->amount_refunded ?? 0.00), 2));
+        $requestedAmount = round((float) $request->input('refund_amount', $orderReturn->refund_amount), 2);
+
+        if ($requestedAmount > $remainingRefundable) {
+            return response()->json([
+                'status' => 'error',
+                'message' => "Refund amount (৳{$requestedAmount}) exceeds the order's remaining refundable balance of ৳{$remainingRefundable}.",
+            ], 422);
+        }
+
         $orderReturn = $this->returnService->processRefund($orderReturn, $request->all(), $request->user());
 
         AuditLog::log(
-            $request->user()?->id,
+            $request->user(),
             'order.return_refund_processed',
             'OrderReturn',
             $orderReturn->id,
@@ -322,6 +352,8 @@ class AdminReturnController extends Controller
      */
     public function destroy(Request $request, int $id): JsonResponse
     {
+        $this->checkPermission($request, 'returns.manage');
+
         $orderReturn = OrderReturn::with('items')->findOrFail($id);
         $returnNumber = $orderReturn->return_number;
         $oldValues = $orderReturn->toArray();
@@ -352,6 +384,8 @@ class AdminReturnController extends Controller
      */
     public function bulkDestroy(Request $request): JsonResponse
     {
+        $this->checkPermission($request, 'returns.manage');
+
         $validated = $request->validate([
             'ids' => 'required|array|min:1',
             'ids.*' => 'integer',

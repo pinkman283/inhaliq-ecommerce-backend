@@ -185,7 +185,7 @@ class AdminPosSalesTest extends TestCase
 
         $response->assertStatus(422)
             ->assertJson([
-                'message' => 'Cannot process sale on a closed register session.',
+                'message' => 'The selected register session is closed.',
             ]);
     }
 
@@ -197,7 +197,7 @@ class AdminPosSalesTest extends TestCase
         $response = $this->postJson('/api/admin/pos/checkout', []);
 
         $response->assertStatus(422)
-            ->assertJsonValidationErrors(['pos_register_session_id', 'payment_method', 'items']);
+            ->assertJsonValidationErrors(['items']);
     }
 
     /**

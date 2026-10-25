@@ -49,17 +49,31 @@ class OrderController extends Controller
             ->with(['items', 'user'])
             ->firstOrFail();
 
-        // Strictly protect customer privacy: if order belongs to a registered customer account,
-        // it can only be accessed by that customer or staff/admin.
-        if ($order->user_id) {
-            if (!$user || ($order->user_id !== $user->id && !$user->isStaffOrAdmin())) {
-                return response()->json([
-                    'message' => 'Access Denied: You do not have authorization to view this customer order.',
-                ], 403);
-            }
+        // 1. Staff and administrators have authorized access
+        if ($user && $user->isStaffOrAdmin()) {
+            return response()->json($order);
         }
 
-        return response()->json($order);
+        // 2. Authenticated account owner check
+        if ($user && ($order->user_id === $user->id || strtolower(trim($order->customer_email)) === strtolower(trim($user->email)))) {
+            return response()->json($order);
+        }
+
+        // 3. Unauthenticated / guest access: require verification via email or phone to prevent mass PII scraping / IDOR
+        $providedEmail = strtolower(trim($request->query('email', $request->input('email', ''))));
+        $providedPhone = preg_replace('/\D/', '', (string) $request->query('phone', $request->input('phone', '')));
+        $orderPhone = preg_replace('/\D/', '', (string) ($order->customer_phone ?? ''));
+
+        $isVerifiedGuest = (!empty($providedEmail) && strtolower(trim($order->customer_email)) === $providedEmail)
+            || (!empty($providedPhone) && !empty($orderPhone) && $orderPhone === $providedPhone);
+
+        if ($isVerifiedGuest) {
+            return response()->json($order);
+        }
+
+        return response()->json([
+            'message' => 'Access Denied: Customer verification required to view order details. Please provide verified email or phone.',
+        ], 403);
     }
 
     public function track(string $orderNumber): JsonResponse
@@ -205,7 +219,7 @@ class OrderController extends Controller
                 }
             }
 
-            $result = DB::transaction(function () use ($request, $validated, $customerRecord, $clientIp, $paymentProvider, $canonicalPaymentMethod) {
+            $result = DB::transaction(function () use ($request, $validated, $customerRecord, $clientIp, $paymentProvider, $canonicalPaymentMethod, $user) {
                 $subtotal = 0.00;
                 $itemsToCreate = [];
 
@@ -360,6 +374,12 @@ class OrderController extends Controller
 
                 // If customer requested store credit application, deduct atomically
                 if (!empty($validated['use_store_credit'])) {
+                    if (!$user || (int) $user->id !== (int) $customerRecord->id) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'use_store_credit' => ['Store credit wallet balance can only be redeemed by an authenticated account owner. Please log in to apply store credit.'],
+                        ]);
+                    }
+
                     $requestedCredit = (float) ($validated['store_credit_amount'] ?? $total);
                     StoreCreditService::applyToOrder($order, $requestedCredit, $customerRecord);
                 }
@@ -529,6 +549,14 @@ class OrderController extends Controller
 
             // 2. Reverse Promotions & Coupons
             PromotionEngine::reverseOrderRedemptions($order, "Order cancelled by customer {$user->name}");
+
+            // 3. Restore Store Credit Wallet Balance
+            if ((float) ($order->store_credit_amount ?? 0) > 0) {
+                StoreCreditService::refundOrderCredit(
+                    $order,
+                    "Store credit restored upon cancellation of Order #{$order->order_number}"
+                );
+            }
 
             // 3. Post Accounting Cancellation
             try {

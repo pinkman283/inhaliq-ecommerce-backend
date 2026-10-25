@@ -134,7 +134,7 @@ Route::get('/orders/track/{orderNumber}', [OrderController::class, 'track']);
 Route::get('/shipping-zones', [OrderController::class, 'shippingZones']);
 Route::get('/payment-methods', [OrderController::class, 'paymentMethods']);
 Route::post('/webhooks/courier/{provider}', [\App\Http\Controllers\Api\CourierWebhookController::class, 'handle']);
-Route::get('/orders/{orderNumber}', [OrderController::class, 'show']);
+Route::get('/orders/{orderNumber}', [OrderController::class, 'show'])->middleware('sliding-throttle:order-checkout');
 Route::post('/orders', [OrderController::class, 'store'])->middleware('sliding-throttle:order-checkout'); // Guest / Customer Checkout
 Route::post('/leads/capture', [LeadCaptureController::class, 'capture'])->middleware('sliding-throttle:leads-capture'); // Storefront Checkout Abandonment Capture
 Route::get('/theme-settings', [ThemeController::class, 'publicSettings']);

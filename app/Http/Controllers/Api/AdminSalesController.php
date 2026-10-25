@@ -8,7 +8,7 @@ use App\Models\OrderItem;
 use App\Models\Setting;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use App\Services\CsvSanitizer;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AdminSalesController extends Controller
@@ -230,7 +230,7 @@ class AdminSalesController extends Controller
 
             $query->chunk(100, function ($orders) use ($handle) {
                 foreach ($orders as $o) {
-                    fputcsv($handle, [
+                    fputcsv($handle, CsvSanitizer::sanitizeRow([
                         $o->order_number,
                         $o->created_at->format('Y-m-d H:i:s'),
                         strtoupper($o->order_source ?? 'online'),
@@ -247,7 +247,7 @@ class AdminSalesController extends Controller
                         $o->total_amount,
                         $o->cogs_amount ?? 0.00,
                         $o->gross_profit ?? 0.00,
-                    ]);
+                    ]));
                 }
             });
 

@@ -137,7 +137,7 @@ class AdminProductController extends Controller
         ]);
 
         $file = $request->file('image');
-        $ext = $file->getClientOriginalExtension() ?: ($file->guessExtension() ?: 'jpg');
+        $ext = $file->extension() ?: ($file->guessExtension() ?: 'jpg');
         $filename = 'prod_' . Str::random(16) . '_' . time() . '.' . strtolower($ext);
         $path = $file->storeAs('products', $filename, 'public');
         $fullUrl = url('storage/' . $path);
