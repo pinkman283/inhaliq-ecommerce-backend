@@ -170,10 +170,39 @@ class SlidingWindowThrottle
                 $email = Str::transliterate(Str::lower(trim((string) $request->input('customer_email', 'guest'))));
                 return [
                     [
-                        'key' => 'order_guest:' . $email . '|' . $ip,
-                        'limit' => 10,
+                        'key' => 'order_guest_ip:' . $ip,
+                        'limit' => 15,
                         'window' => 60,
-                        'message' => 'Checkout rate limit reached. Please wait before placing another order.',
+                        'message' => 'Too many checkout requests originating from this network. Please wait.',
+                    ],
+                    [
+                        'key' => 'order_guest:' . $email . '|' . $ip,
+                        'limit' => 8,
+                        'window' => 60,
+                        'message' => 'Checkout rate limit reached for this account. Please wait before placing another order.',
+                    ],
+                ];
+
+            // 4b. Public Order Tracking (Anti-scraping defense)
+            case 'order-tracking':
+                return [
+                    [
+                        'key' => 'order_track_ip:' . $ip,
+                        'limit' => 30,
+                        'window' => 60,
+                        'message' => 'Too many order tracking requests. Please slow down.',
+                    ],
+                ];
+
+            // 4c. Public Cart Validation (DoS protection)
+            case 'cart-validation':
+                $identifier = $user ? ('user:' . $user->id) : ('ip:' . $ip);
+                return [
+                    [
+                        'key' => 'cart_val:' . $identifier,
+                        'limit' => 45,
+                        'window' => 60,
+                        'message' => 'Too many cart verification requests. Please wait a moment.',
                     ],
                 ];
 

@@ -24,21 +24,46 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
+            'email' => [
+                'required',
+                'string',
+                'email',
+                'max:255',
+                function ($attribute, $value, $fail) {
+                    $u = User::where('email', strtolower(trim($value)))->first();
+                    if ($u && $u->customer_type !== 'guest') {
+                        $fail('The email has already been taken.');
+                    }
+                },
+            ],
             'password' => 'required|string|min:6',
             'phone' => 'nullable|string|max:30',
         ]);
 
         // 1. Check if OTP Shield is disabled in store settings
         if (!\App\Models\Setting::isOtpShieldEnabled()) {
-            $user = User::create([
-                'name' => $validated['name'],
-                'email' => $validated['email'],
-                'password' => Hash::make($validated['password']),
-                'role' => 'customer',
-                'phone' => $validated['phone'] ?? null,
-                'avatar' => 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80',
-            ]);
+            $existing = User::where('email', $validated['email'])->first();
+            if ($existing && $existing->customer_type === 'guest') {
+                $existing->update([
+                    'name' => $validated['name'],
+                    'password' => Hash::make($validated['password']),
+                    'phone' => $validated['phone'] ?? $existing->phone,
+                    'customer_type' => 'registered',
+                    'status' => 'active',
+                ]);
+                $user = $existing;
+            } else {
+                $user = User::create([
+                    'name' => $validated['name'],
+                    'email' => $validated['email'],
+                    'password' => Hash::make($validated['password']),
+                    'role' => 'customer',
+                    'customer_type' => 'registered',
+                    'status' => 'active',
+                    'phone' => $validated['phone'] ?? null,
+                    'avatar' => 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80',
+                ]);
+            }
 
             $token = $user->createToken('auth_token', ['customer:access'])->plainTextToken;
 
@@ -102,32 +127,49 @@ class AuthController extends Controller
             'otp' => 'required|string|size:6',
         ]);
 
-        $pending = PendingRegistration::where('email', $validated['email'])->first();
+        $user = \Illuminate\Support\Facades\DB::transaction(function () use ($validated) {
+            $pending = PendingRegistration::where('email', $validated['email'])->lockForUpdate()->first();
 
-        if (!$pending || $pending->expires_at < now()) {
-            throw ValidationException::withMessages(['otp' => ['The OTP has expired or is invalid.']]);
-        }
+            if (!$pending || $pending->expires_at < now()) {
+                throw ValidationException::withMessages(['otp' => ['The OTP has expired or is invalid.']]);
+            }
 
-        if ($pending->attempts >= 5) {
-            throw ValidationException::withMessages(['otp' => ['Too many failed attempts. Please request a new OTP.']]);
-        }
+            if ($pending->attempts >= 5) {
+                throw ValidationException::withMessages(['otp' => ['Too many failed attempts. Please request a new OTP.']]);
+            }
 
-        if (!Hash::check($validated['otp'], $pending->otp_hash)) {
-            $pending->increment('attempts');
-            throw ValidationException::withMessages(['otp' => ['The provided OTP is incorrect.']]);
-        }
+            if (!Hash::check($validated['otp'], $pending->otp_hash)) {
+                $pending->increment('attempts');
+                throw ValidationException::withMessages(['otp' => ['The provided OTP is incorrect.']]);
+            }
 
-        // OTP is valid. Create user.
-        $user = User::create([
-            'name' => $pending->name,
-            'email' => $pending->email,
-            'password' => $pending->password_hash,
-            'role' => 'customer',
-            'phone' => $pending->phone,
-            'avatar' => 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80',
-        ]);
+            // OTP is valid. If a guest user record already exists for this email, upgrade it to an active registered customer
+            $existing = User::where('email', $pending->email)->first();
+            if ($existing && $existing->customer_type === 'guest') {
+                $existing->update([
+                    'name' => $pending->name,
+                    'password' => $pending->password_hash,
+                    'phone' => $pending->phone ?: $existing->phone,
+                    'customer_type' => 'registered',
+                    'status' => 'active',
+                ]);
+                $createdOrUpgraded = $existing;
+            } else {
+                $createdOrUpgraded = User::create([
+                    'name' => $pending->name,
+                    'email' => $pending->email,
+                    'password' => $pending->password_hash,
+                    'role' => 'customer',
+                    'customer_type' => 'registered',
+                    'status' => 'active',
+                    'phone' => $pending->phone,
+                    'avatar' => 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80',
+                ]);
+            }
 
-        $pending->delete(); // Consume OTP
+            $pending->delete(); // Consume OTP
+            return $createdOrUpgraded;
+        });
 
         $token = $user->createToken('auth_token', ['customer:access'])->plainTextToken;
 

@@ -124,13 +124,13 @@ Route::get('/categories', [CategoryController::class, 'index']);
 Route::get('/categories/{slug}', [CategoryController::class, 'show']);
 Route::get('/brands', [BrandController::class, 'index']);
 Route::get('/brands/{slug}', [BrandController::class, 'show']);
-Route::post('/cart/validate', [CartValidationController::class, 'validateCart']);
+Route::post('/cart/validate', [CartValidationController::class, 'validateCart'])->middleware('sliding-throttle:cart-validation');
 Route::post('/coupons/validate', [CouponController::class, 'validateCoupon'])->middleware('sliding-throttle:coupon-validation');
 Route::post('/promotions/evaluate', [PromotionController::class, 'evaluate']);
 Route::get('/promotions/claimable', [PromotionController::class, 'claimable']);
 Route::get('/promotions/storefront', [PromotionController::class, 'storefrontPromotions']);
 Route::get('/promotions/campaign/{slug}', [PromotionController::class, 'campaignDetails']);
-Route::get('/orders/track/{orderNumber}', [OrderController::class, 'track']);
+Route::get('/orders/track/{orderNumber}', [OrderController::class, 'track'])->middleware('sliding-throttle:order-tracking');
 Route::get('/shipping-zones', [OrderController::class, 'shippingZones']);
 Route::get('/payment-methods', [OrderController::class, 'paymentMethods']);
 Route::post('/webhooks/courier/{provider}', [\App\Http\Controllers\Api\CourierWebhookController::class, 'handle']);
@@ -251,8 +251,8 @@ Route::post('/auth/password/forgot', [AuthController::class, 'forgotPassword'])-
 Route::post('/auth/password/verify-reset-otp', [AuthController::class, 'verifyResetOtp'])->middleware('sliding-throttle:auth-register');
 Route::post('/auth/password/reset', [AuthController::class, 'resetPassword'])->middleware('sliding-throttle:auth-register');
 
-// Customer Authenticated Routes (Strictly require customer:access token ability)
-Route::middleware(['auth:sanctum', 'ability:customer:access'])->group(function () {
+// Customer Authenticated Routes (Require customer:access or admin:access token ability)
+Route::middleware(['auth:sanctum', 'ability:customer:access,admin:access'])->group(function () {
     Route::get('/auth/profile', [AuthController::class, 'profile']);
     Route::put('/auth/profile', [AuthController::class, 'updateProfile']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);

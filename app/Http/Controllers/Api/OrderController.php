@@ -364,15 +364,7 @@ class OrderController extends Controller
                     'ip_address' => $clientIp,
                 ]);
 
-                // Authoritative Payment Registration via PaymentProvider
-                $paymentResult = $paymentProvider->initiatePayment($order);
-                if (!$paymentResult->success) {
-                    throw \Illuminate\Validation\ValidationException::withMessages([
-                        'payment_method' => [$paymentResult->message ?: 'Failed to initialize payment.'],
-                    ]);
-                }
-
-                // If customer requested store credit application, deduct atomically
+                // 1. If customer requested store credit application, deduct atomically BEFORE payment provider initialization
                 if (!empty($validated['use_store_credit'])) {
                     if (!$user || (int) $user->id !== (int) $customerRecord->id) {
                         throw \Illuminate\Validation\ValidationException::withMessages([
@@ -382,6 +374,19 @@ class OrderController extends Controller
 
                     $requestedCredit = (float) ($validated['store_credit_amount'] ?? $total);
                     StoreCreditService::applyToOrder($order, $requestedCredit, $customerRecord);
+                }
+
+                // 2. Authoritative Payment Registration via PaymentProvider
+                if ((float) $order->total_amount <= 0) {
+                    $order->payment_status = 'paid';
+                    $order->save();
+                } else {
+                    $paymentResult = $paymentProvider->initiatePayment($order);
+                    if (!$paymentResult->success) {
+                        throw \Illuminate\Validation\ValidationException::withMessages([
+                            'payment_method' => [$paymentResult->message ?: 'Failed to initialize payment.'],
+                        ]);
+                    }
                 }
 
                 // Record authoritative promotion redemption audit records (with concurrency safety)
@@ -422,33 +427,49 @@ class OrderController extends Controller
                     ]);
                 }
 
-                // Update risk score
-                \App\Services\CustomerRiskService::calculateCustomerRisk($customerRecord);
-
-                // Record Initial Order Placed Timeline Milestone
-                \App\Services\OrderTimelineService::recordEvent(
-                    order: $order,
-                    eventType: 'order_placed',
-                    title: 'Order Placed (Cash on Delivery)',
-                    description: "Order #{$order->order_number} placed by {$order->customer_name} for " . count($itemsToCreate) . " item(s). Collectable COD: ৳" . number_format($order->total_amount, 2),
-                    actorName: $order->customer_name ?: 'Customer',
-                    iconType: 'check',
-                    metadata: [
-                        'order_number' => $order->order_number,
-                        'payment_method' => 'cash_on_delivery',
-                        'subtotal' => $subtotal,
-                        'shipping' => $shipping,
-                        'total' => $total,
-                    ]
-                );
-
-                // Send customer confirmation email & SMS
-                \App\Services\CustomerNotificationService::sendOrderConfirmation($order);
-
-                // Dispatch internal operational notification to authorized staff & admins
-                \App\Services\AdminNotificationService::notifyNewOrder($order);
-
                 return $order->load('items');
+            });
+
+            // Post-transaction operational tasks deferred to run asynchronously after response is sent
+            defer(function () use ($customerRecord, $result) {
+                try {
+                    \App\Services\CustomerRiskService::calculateCustomerRisk($customerRecord);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("Customer risk scoring deferred: " . $e->getMessage());
+                }
+
+                try {
+                    \App\Services\OrderTimelineService::recordEvent(
+                        order: $result,
+                        eventType: 'order_placed',
+                        title: 'Order Placed (' . ($result->payment_method === 'cash_on_delivery' ? 'Cash on Delivery' : 'Online Payment') . ')',
+                        description: "Order #{$result->order_number} placed by {$result->customer_name} for " . $result->items->count() . " item(s). Total: ৳" . number_format($result->total_amount, 2),
+                        actorName: $result->customer_name ?: 'Customer',
+                        iconType: 'check',
+                        metadata: [
+                            'order_number' => $result->order_number,
+                            'payment_method' => $result->payment_method,
+                            'subtotal' => $result->subtotal,
+                            'shipping' => $result->shipping_amount,
+                            'total' => $result->total_amount,
+                        ]
+                    );
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("Order timeline recording deferred: " . $e->getMessage());
+                }
+
+                // Customer confirmation & administrative alerts (outside transaction to prevent lock queueing)
+                try {
+                    \App\Services\CustomerNotificationService::sendOrderConfirmation($result);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("Order confirmation notification deferred: " . $e->getMessage());
+                }
+
+                try {
+                    \App\Services\AdminNotificationService::notifyNewOrder($result);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("Admin order notification deferred: " . $e->getMessage());
+                }
             });
 
             return response()->json([
@@ -524,7 +545,7 @@ class OrderController extends Controller
             ], 403);
         }
 
-        // State Machine validation: only pending orders can be cancelled directly by customer
+        // State Machine validation: initial fast-fail check
         if ($order->order_status !== 'pending') {
             return response()->json([
                 'success' => false,
@@ -532,58 +553,77 @@ class OrderController extends Controller
             ], 422);
         }
 
-        DB::transaction(function () use ($order, $user) {
-            // 1. Restore product & variant inventory
-            foreach ($order->items as $item) {
-                if ($item->variant_id) {
-                    $variant = ProductVariant::where('id', $item->variant_id)->lockForUpdate()->first();
-                    if ($variant) {
-                        $variant->increment('stock_quantity', $item->quantity);
+        try {
+            $cancelledOrder = DB::transaction(function () use ($order, $user) {
+                // Strict row lock on order to prevent concurrent double-cancellation / double-refund races
+                $lockedOrder = Order::where('id', $order->id)->lockForUpdate()->firstOrFail();
+                if ($lockedOrder->order_status !== 'pending') {
+                    throw new \InvalidArgumentException("Order #{$lockedOrder->order_number} cannot be cancelled because it is already {$lockedOrder->order_status}.");
+                }
+
+                // 1. Restore product & variant inventory
+                foreach ($lockedOrder->items as $item) {
+                    if ($item->variant_id) {
+                        $variant = ProductVariant::where('id', $item->variant_id)->lockForUpdate()->first();
+                        if ($variant) {
+                            $variant->increment('stock_quantity', $item->quantity);
+                        }
+                    }
+                    $product = Product::where('id', $item->product_id)->lockForUpdate()->first();
+                    if ($product) {
+                        $product->increment('stock_quantity', $item->quantity);
                     }
                 }
-                $product = Product::where('id', $item->product_id)->lockForUpdate()->first();
-                if ($product) {
-                    $product->increment('stock_quantity', $item->quantity);
+
+                // 2. Reverse Promotions & Coupons
+                PromotionEngine::reverseOrderRedemptions($lockedOrder, "Order cancelled by customer {$user->name}");
+
+                // 3. Restore Store Credit Wallet Balance
+                if ((float) ($lockedOrder->store_credit_amount ?? 0) > 0) {
+                    StoreCreditService::refundOrderCredit(
+                        $lockedOrder,
+                        "Store credit restored upon cancellation of Order #{$lockedOrder->order_number}"
+                    );
                 }
-            }
 
-            // 2. Reverse Promotions & Coupons
-            PromotionEngine::reverseOrderRedemptions($order, "Order cancelled by customer {$user->name}");
+                // 4. Post Accounting Cancellation
+                try {
+                    AccountingService::postOrderCancellation($lockedOrder);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("Accounting cancellation post deferred: " . $e->getMessage());
+                }
 
-            // 3. Restore Store Credit Wallet Balance
-            if ((float) ($order->store_credit_amount ?? 0) > 0) {
-                StoreCreditService::refundOrderCredit(
-                    $order,
-                    "Store credit restored upon cancellation of Order #{$order->order_number}"
-                );
-            }
+                // 5. Update Status
+                $lockedOrder->update(['order_status' => 'cancelled']);
 
-            // 3. Post Accounting Cancellation
+                return $lockedOrder;
+            });
+
+            // 6. Record Timeline (outside transaction)
             try {
-                AccountingService::postOrderCancellation($order);
+                OrderTimelineService::recordEvent(
+                    order: $cancelledOrder,
+                    eventType: 'cancelled',
+                    title: 'Order Cancelled by Customer',
+                    description: "Order #{$cancelledOrder->order_number} was cancelled by customer {$user->name}. Inventory and redemptions restored.",
+                    actorName: $user->name ?: 'Customer'
+                );
             } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::warning("Accounting cancellation post deferred: " . $e->getMessage());
+                \Illuminate\Support\Facades\Log::warning("Cancellation timeline deferred: " . $e->getMessage());
             }
 
-            // 4. Record Timeline
-            OrderTimelineService::recordEvent(
-                order: $order,
-                eventType: 'cancelled',
-                title: 'Order Cancelled by Customer',
-                description: "Order #{$order->order_number} was cancelled by customer {$user->name}. Inventory and redemptions restored.",
-                actorName: $user->name ?: 'Customer'
-            );
-
-            // 5. Update Status
-            $order->update(['order_status' => 'cancelled']);
-        });
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Order successfully cancelled.',
-            'order_status' => 'cancelled',
-            'order' => $order->fresh(['items']),
-        ]);
+            return response()->json([
+                'success' => true,
+                'message' => 'Order successfully cancelled.',
+                'order_status' => 'cancelled',
+                'order' => $cancelledOrder->fresh(['items']),
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
     }
 
     /**

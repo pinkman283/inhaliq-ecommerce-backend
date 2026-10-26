@@ -20,7 +20,7 @@ class CartValidationController extends Controller
     public function validateCart(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'items' => 'present|array',
+            'items' => 'present|array|max:50',
             'items.*.product_id' => 'required|integer',
             'items.*.variant_id' => 'nullable|integer',
             'items.*.quantity' => 'required|integer|min:1',

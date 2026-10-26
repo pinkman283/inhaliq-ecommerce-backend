@@ -128,7 +128,8 @@ class InventoryCostingService
                             : ($product->cost_price !== null && (float)$product->cost_price > 0 ? (float)$product->cost_price : null);
 
                         if ($baseCost === null) {
-                            throw new \RuntimeException("Fulfillment halted for product '{$product->name}' with no valid FIFO cost layer or documented cost price.");
+                            \Illuminate\Support\Facades\Log::warning("Fulfillment for product '{$product->name}' (ID: {$product->id}) has no FIFO layer or documented cost price; defaulting COGS base cost to 0.00 to guarantee stock decrement.");
+                            $baseCost = 0.00;
                         }
 
                         $itemCogs += ($remainingQty * $baseCost);

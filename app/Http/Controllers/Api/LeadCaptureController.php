@@ -27,11 +27,30 @@ class LeadCaptureController extends Controller
         $user = $request->user('sanctum');
         $lead = null;
 
-        // 1. Try to find by lead_id if supplied
+        // 1. If lead_id is supplied, verify ownership to prevent unauthenticated IDOR tampering
         if (!empty($validated['lead_id'])) {
-            $lead = Lead::where('id', $validated['lead_id'])
+            $candidate = Lead::where('id', $validated['lead_id'])
                 ->where('status', '!=', 'converted')
                 ->first();
+
+            if ($candidate) {
+                $isOwner = false;
+                if ($user && $candidate->user_id && (int) $candidate->user_id === (int) $user->id) {
+                    $isOwner = true;
+                } elseif (!empty($candidate->phone) && preg_replace('/\D/', '', (string) $candidate->phone) === preg_replace('/\D/', '', (string) $validated['phone'])) {
+                    $isOwner = true;
+                } elseif (!empty($validated['email']) && !empty($candidate->email) && strtolower(trim($candidate->email)) === strtolower(trim($validated['email']))) {
+                    $isOwner = true;
+                }
+
+                if ($isOwner) {
+                    $lead = $candidate;
+                } else {
+                    return response()->json([
+                        'message' => 'Unauthorized to update this lead.',
+                    ], 403);
+                }
+            }
         }
 
         // 2. Otherwise, look for a recent unconverted lead matching phone (within last 4 hours)

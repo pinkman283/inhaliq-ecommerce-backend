@@ -49,6 +49,11 @@ class ReviewController extends Controller
                 ->exists();
         }
 
+        // Check store review moderation policy
+        $autoApproveSetting = Setting::where('key', 'auto_approve_reviews')->first();
+        $autoApproveEnabled = $autoApproveSetting ? filter_var($autoApproveSetting->value, FILTER_VALIDATE_BOOLEAN) : false;
+        $isApproved = ($user && $user->isStaffOrAdmin()) || ($autoApproveEnabled && $isVerifiedPurchase);
+
         $review = Review::create([
             'product_id' => $product->id,
             'user_id' => $userId,
@@ -58,10 +63,10 @@ class ReviewController extends Controller
             'title' => $validated['title'] ?? null,
             'comment' => $validated['comment'] ?? null,
             'is_verified_purchase' => $isVerifiedPurchase,
-            'is_approved' => true,
+            'is_approved' => $isApproved,
         ]);
 
-        // Recalculate average rating & review count
+        // Recalculate average rating & review count for approved reviews
         $avgRating = $product->reviews()->where('is_approved', true)->avg('rating') ?: 0.0;
         $count = $product->reviews()->where('is_approved', true)->count();
 
@@ -71,7 +76,7 @@ class ReviewController extends Controller
         ]);
 
         return response()->json([
-            'message' => 'Review submitted successfully',
+            'message' => $isApproved ? 'Review submitted successfully' : 'Review submitted for moderation. It will be published upon approval.',
             'review' => $review,
         ], 201);
     }

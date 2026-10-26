@@ -31,7 +31,7 @@ class AdminAuthController extends Controller
             ]);
         }
 
-        // STRICT SECURITY BOUNDARY: Reject normal customer accounts
+        // STRICT SECURITY BOUNDARY: Reject non-administrative accounts without leaking account existence
         if (!in_array($user->role, ['super_admin', 'admin', 'staff'])) {
             AuditLog::log(
                 null,
@@ -42,9 +42,9 @@ class AdminAuthController extends Controller
                 ['email' => $user->email, 'role' => $user->role]
             );
 
-            return response()->json([
-                'message' => 'Access Denied: You do not have administrative privileges to access this console.',
-            ], 403);
+            throw ValidationException::withMessages([
+                'email' => ['The provided credentials do not match our records.'],
+            ]);
         }
 
         if ($user->locked_until && $user->locked_until > now()) {
