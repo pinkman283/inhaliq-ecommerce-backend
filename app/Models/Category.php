@@ -57,23 +57,38 @@ class Category extends Model
         static::saved(function () {
             \Illuminate\Support\Facades\DB::afterCommit(function () {
                 \Illuminate\Support\Facades\Cache::forget('storefront_header_navigation');
+                \Illuminate\Support\Facades\Cache::forget('category_children_map_v1');
             });
         });
 
         static::deleted(function () {
             \Illuminate\Support\Facades\DB::afterCommit(function () {
                 \Illuminate\Support\Facades\Cache::forget('storefront_header_navigation');
+                \Illuminate\Support\Facades\Cache::forget('category_children_map_v1');
             });
         });
     }
 
     public function getAllChildrenIds(): array
     {
+        $categoryMap = \Illuminate\Support\Facades\Cache::remember('category_children_map_v1', 3600, function () {
+            return static::select('id', 'parent_id')
+                ->get()
+                ->groupBy('parent_id')
+                ->map(fn ($items) => $items->pluck('id')->all())
+                ->all();
+        });
+
         $ids = [];
-        $children = $this->relationLoaded('children') ? $this->children : $this->children()->get();
-        foreach ($children as $child) {
-            $ids[] = $child->id;
-            $ids = array_merge($ids, $child->getAllChildrenIds());
+        $stack = $categoryMap[$this->id] ?? [];
+        while (!empty($stack)) {
+            $currentId = array_pop($stack);
+            $ids[] = $currentId;
+            if (isset($categoryMap[$currentId])) {
+                foreach ($categoryMap[$currentId] as $grandchildId) {
+                    $stack[] = $grandchildId;
+                }
+            }
         }
         return $ids;
     }

@@ -60,7 +60,7 @@ class DynamicCorsOriginMiddleware
      */
     public function resolveAllowedOrigins(): array
     {
-        return Cache::remember(self::CACHE_KEY, 60, function () {
+        return Cache::remember(self::CACHE_KEY, 86400, function () {
             try {
                 $integration = Integration::where('provider', 'headless_api')
                     ->where('is_enabled', true)

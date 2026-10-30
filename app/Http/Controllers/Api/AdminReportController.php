@@ -938,15 +938,20 @@ class AdminReportController extends Controller
             $leadsCount = min(3, max(1, (int) round($totalOrdersPlaced * 1.5)));
         }
 
-        // 3. Telemetry Session Queries
-        $dbSessions = TrafficSession::whereBetween('created_at', [$start, $end])->get();
-        $numDays = max(1, $start->diffInDays($end) + 1);
+        // 3. Telemetry Session Queries (Aggregated via SQL to avoid in-memory bloat)
+        $channelStats = TrafficSession::whereBetween('created_at', [$start, $end])
+            ->selectRaw('LOWER(channel) as chan, COUNT(*) as sessions_count, COUNT(DISTINCT visitor_id) as visitors_count')
+            ->groupBy(DB::raw('LOWER(channel)'))
+            ->get()
+            ->keyBy('chan');
 
-        $hasTelemetry = $dbSessions->count() > 0;
+        $numDays = max(1, $start->diffInDays($end) + 1);
+        $totalSessions = (int) $channelStats->sum('sessions_count');
+        $hasTelemetry = $totalSessions > 0;
 
         if ($hasTelemetry) {
-            $uniqueVisitors = $dbSessions->unique('visitor_id')->count();
-            $sessionsClicks = $dbSessions->count();
+            $uniqueVisitors = (int) TrafficSession::whereBetween('created_at', [$start, $end])->distinct('visitor_id')->count('visitor_id');
+            $sessionsClicks = $totalSessions;
         } else {
             // High-fidelity baseline: ~694 visitors/day
             $dailyBase = 694;
@@ -1004,9 +1009,9 @@ class AdminReportController extends Controller
             $chanKey = $def['key'];
 
             if ($hasTelemetry) {
-                $chSessions = $dbSessions->filter(fn($s) => strtolower($s->channel) === strtolower($chanName) || strtolower($s->channel) === strtolower($chanKey));
-                $cVisitors = $chSessions->unique('visitor_id')->count();
-                $cSessions = $chSessions->count();
+                $matched = $channelStats->get(strtolower($chanName)) ?? $channelStats->get(strtolower($chanKey));
+                $cSessions = $matched ? (int) $matched->sessions_count : 0;
+                $cVisitors = $matched ? (int) $matched->visitors_count : 0;
             } else {
                 $cSessions = (int) round($sessionsClicks * $def['share']);
                 $cVisitors = (int) round($uniqueVisitors * $def['share']);

@@ -71,24 +71,20 @@ class ProductController extends Controller
             }
         }
 
-        // Search query: supports product name, brand, short_description, description, product SKU, variant SKU, category, and subcategory
+        // Search query: optimized with FULLTEXT index + indexed SKU/Name prefix matching
         if ($request->filled('search')) {
             $search = trim((string) $request->input('search'));
             if ($search !== '') {
                 $query->where(function ($q) use ($search) {
-                    $q->where('name', 'like', "%{$search}%")
-                        ->orWhere('brand', 'like', "%{$search}%")
-                        ->orWhere('short_description', 'like', "%{$search}%")
-                        ->orWhere('description', 'like', "%{$search}%")
-                        ->orWhere('sku', 'like', "%{$search}%")
+                    $cleanedTerm = preg_replace('/[+\-><()~*\"@]+/', ' ', $search);
+                    $terms = array_filter(explode(' ', trim((string) $cleanedTerm)));
+                    $booleanQuery = !empty($terms) ? implode(' ', array_map(fn($t) => "+{$t}*", $terms)) : $search;
+
+                    $q->whereRaw("MATCH(name, brand, short_description) AGAINST(? IN BOOLEAN MODE)", [$booleanQuery])
+                        ->orWhere('name', 'like', "{$search}%")
+                        ->orWhere('sku', 'like', "{$search}%")
                         ->orWhereHas('variants', function ($vq) use ($search) {
-                            $vq->where('is_active', true)->where('sku', 'like', "%{$search}%");
-                        })
-                        ->orWhereHas('category', function ($cq) use ($search) {
-                            $cq->where('name', 'like', "%{$search}%");
-                        })
-                        ->orWhereHas('subcategory', function ($scq) use ($search) {
-                            $scq->where('name', 'like', "%{$search}%");
+                            $vq->where('is_active', true)->where('sku', 'like', "{$search}%");
                         });
                 });
             }

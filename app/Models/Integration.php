@@ -123,4 +123,15 @@ class Integration extends Model
 
         return $masked;
     }
+
+    protected static function booted(): void
+    {
+        static::saved(function () {
+            \Illuminate\Support\Facades\Cache::forget('headless_cors_allowed_origins');
+        });
+
+        static::deleted(function () {
+            \Illuminate\Support\Facades\Cache::forget('headless_cors_allowed_origins');
+        });
+    }
 }
