@@ -31,6 +31,7 @@ class User extends Authenticatable
         'suspension_reason',
         'phone',
         'avatar',
+        'admin_theme',
         'failed_login_attempts',
         'locked_until',
     ];

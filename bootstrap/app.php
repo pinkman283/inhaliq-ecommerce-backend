@@ -20,6 +20,7 @@ return Application::configure(basePath: dirname(__DIR__))
             $middleware->trustProxies(at: array_map('trim', explode(',', $trusted)));
         }
 
+        $middleware->redirectGuestsTo(fn (Request $request) => $request->is('api/*') ? null : '/admin/login');
         $middleware->prepend(\App\Http\Middleware\DynamicCorsOriginMiddleware::class);
         $middleware->append(\App\Http\Middleware\SecurityHeaders::class);
 

@@ -300,6 +300,7 @@ Route::middleware(['auth:sanctum', 'ability:admin:access', 'admin'])->prefix('ad
     // Admin Session
     Route::get('/auth/me', [AdminAuthController::class, 'me']);
     Route::put('/auth/profile', [AdminAuthController::class, 'updateProfile']);
+    Route::put('/auth/theme', [AdminAuthController::class, 'updateTheme']);
     Route::post('/auth/logout', [AdminAuthController::class, 'logout']);
     Route::post('/auth/invite', [AdminAuthController::class, 'invite']);
 

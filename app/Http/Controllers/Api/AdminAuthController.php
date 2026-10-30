@@ -126,6 +126,7 @@ class AdminAuthController extends Controller
                 'status' => $user->status,
                 'avatar' => $user->avatar,
                 'phone' => $user->phone,
+                'admin_theme' => $user->admin_theme ?? 'dark',
             ],
         ]);
     }
@@ -208,6 +209,7 @@ class AdminAuthController extends Controller
                 'status' => $user->status,
                 'avatar' => $user->avatar,
                 'phone' => $user->phone,
+                'admin_theme' => $user->admin_theme ?? 'dark',
             ],
         ]);
     }
@@ -299,7 +301,24 @@ class AdminAuthController extends Controller
                 'status' => $user->status,
                 'avatar' => $user->avatar,
                 'phone' => $user->phone,
+                'admin_theme' => $user->admin_theme ?? 'dark',
             ],
+        ]);
+    }
+
+    public function updateTheme(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'theme' => 'required|string|in:dark,light',
+        ]);
+
+        $user = $request->user();
+        $user->admin_theme = $validated['theme'];
+        $user->save();
+
+        return response()->json([
+            'message' => 'Admin theme updated successfully.',
+            'theme' => $user->admin_theme,
         ]);
     }
 
